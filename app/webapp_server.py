@@ -9,7 +9,7 @@ from aiohttp import web
 
 from app.access import NOT_IN_CHANNEL, is_channel_member
 from app.config import Settings
-from app.domain import format_user_receipt, is_after_deadline, person_total, today_in_tz
+from app.domain import dish_label, format_user_receipt, is_after_deadline, person_total, today_in_tz
 from app.edatomsk import (
     DayMenu,
     apply_details,
@@ -30,10 +30,22 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "webapp"
 
 
 class MenuCache:
-    def __init__(self) -> None:
+    def __init__(self, storage: Storage | None = None) -> None:
         self._menu: DayMenu | None = None
         self._lock = asyncio.Lock()
+        self._storage = storage
         self.meta_ok = False
+
+    async def _remember_names(self, menu: DayMenu) -> None:
+        if self._storage is None:
+            return
+        try:
+            await self._storage.upsert_dish_names(menu.names_by_id)
+            known = await self._storage.get_dish_names()
+            for dish_id, name in known.items():
+                menu.names_by_id.setdefault(dish_id, name)
+        except Exception:
+            log.exception("Не удалось сохранить названия блюд")
 
     async def get(self, day: date, *, force: bool = False) -> DayMenu:
         key = site_date_key(day.year, day.month, day.day)
@@ -54,6 +66,7 @@ class MenuCache:
                 apply_details(self._menu, parse_menu_page(page))
             except Exception:
                 log.exception("Не удалось подтянуть карточки блюд с сайта")
+            await self._remember_names(self._menu)
             return self._menu
 
     def peek(self) -> DayMenu | None:
@@ -104,7 +117,13 @@ def create_http_app(settings: Settings, storage: Storage, cache: MenuCache) -> w
         items = await storage.get_order(day, int(user["id"]))
         payload["my"] = {str(k): v for k, v in items.items()}
         missing = [
-            {"id": dish_id, "name": f"Нет на сайте (id {dish_id})", "price": 0, "weighty": False, "available": False}
+            {
+                "id": dish_id,
+                "name": dish_label(menu, dish_id),
+                "price": 0,
+                "weighty": False,
+                "available": False,
+            }
             for dish_id, qty in items.items()
             if qty and dish_id not in menu.dishes_by_id
         ]

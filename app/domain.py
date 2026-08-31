@@ -29,6 +29,14 @@ def dish_is_available(menu: DayMenu, dish_id: int) -> bool:
     return bool(dish and dish.available)
 
 
+def dish_label(menu: DayMenu, dish_id: int) -> str:
+    dish = menu.dishes_by_id.get(dish_id)
+    if dish and dish.short_name:
+        return dish.short_name
+    name = (menu.names_by_id.get(dish_id) or "").strip()
+    return name or f"позиция {dish_id}"
+
+
 def unavailable_in_orders(
     menu: DayMenu, orders: list[tuple[int, str, dict[int, int]]]
 ) -> list[tuple[str, list[str]]]:
@@ -40,8 +48,7 @@ def unavailable_in_orders(
                 continue
             if dish_is_available(menu, dish_id):
                 continue
-            dish = menu.dishes_by_id.get(dish_id)
-            missing.append(dish.short_name if dish else f"позиция {dish_id}")
+            missing.append(dish_label(menu, dish_id))
         if missing:
             result.append((name, missing))
     return result
@@ -90,7 +97,7 @@ def format_items(menu: DayMenu, items: dict[int, int]) -> str:
             continue
         dish = menu.dishes_by_id.get(dish_id)
         if not dish:
-            lines.append(f"  позиция {dish_id} × {qty} — нет на сайте")
+            lines.append(f"  {dish_label(menu, dish_id)} × {qty} — нет на сайте")
             continue
         amount = int(dish.price * qty)
         if dish.weighty:
@@ -188,11 +195,28 @@ def format_summary(menu: DayMenu, orders: list[tuple[int, str, dict[int, int]]])
     return "\n\n".join(blocks)
 
 
-def email_body(menu: DayMenu, orders: list[tuple[int, str, dict[int, int]]]) -> str:
+def email_body(
+    menu: DayMenu,
+    orders: list[tuple[int, str, dict[int, int]]],
+    *,
+    address: str,
+    address_comment: str = "",
+    contact_name: str,
+    contact_phone: str,
+) -> str:
+    header = [
+        menu.title,
+        f"Персон: {len(orders)}",
+        "",
+        f"Доставка: {address}",
+    ]
+    if address_comment:
+        header.append(address_comment)
+    header.append(f"Контакт: {contact_name}, {contact_phone}")
     return (
-        f"{menu.title}\n"
-        f"Персон: {len(orders)}\n\n"
-        f"{format_summary(menu, orders)}\n\n"
+        "\n".join(header)
+        + "\n\n"
+        + f"{format_summary(menu, orders)}\n\n"
         "Лист заказа во вложении.\n"
         "Отправлено ботом SashaVarit."
     )

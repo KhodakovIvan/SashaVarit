@@ -28,6 +28,27 @@ header {
   font-size: 13px;
   margin-top: 4px;
 }
+#search {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 16px;
+  outline: none;
+}
+#search::placeholder {
+  color: var(--muted);
+}
+.empty {
+  padding: 24px 8px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
 #status {
   padding: 0 16px 8px;
   font-size: 14px;

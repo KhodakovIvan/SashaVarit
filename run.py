@@ -34,7 +34,7 @@ async def main() -> None:
 
     storage = Storage(settings.data_dir / "orders.sqlite")
     await storage.init()
-    cache = MenuCache()
+    cache = MenuCache(storage)
     ctx = Ctx(settings=settings, storage=storage, cache=cache, public_url=settings.webapp_url)
 
     http_app = create_http_app(settings, storage, cache)

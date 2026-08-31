@@ -13,6 +13,7 @@ const state = {
   qty: {},
   closed: false,
   cardId: null,
+  query: "",
 };
 
 const $menu = document.getElementById("menu");
@@ -30,6 +31,7 @@ const $cardDesc = document.getElementById("card-desc");
 const $cardBgu = document.getElementById("card-bgu");
 const $cardQty = document.getElementById("card-qty");
 const $cardClose = document.getElementById("card-close");
+const $search = document.getElementById("search");
 
 function initData() {
   return (tg && tg.initData) || "";
@@ -135,6 +137,31 @@ function openCard(id) {
   } catch (e) {}
 }
 
+function normalize(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/ё/g, "е");
+}
+
+function dishMatches(dish, catName, needle) {
+  if (!needle) return true;
+  return (
+    normalize(dish.name).includes(needle) ||
+    normalize(dish.description).includes(needle) ||
+    normalize(catName).includes(needle)
+  );
+}
+
+function filteredCategories() {
+  if (!state.menu) return [];
+  const needle = normalize(state.query.trim());
+  const out = [];
+  for (const cat of state.menu.categories) {
+    const dishes = cat.dishes.filter((dish) => dishMatches(dish, cat.name, needle));
+    if (dishes.length) out.push({ name: cat.name, dishes });
+  }
+  return out;
+}
 function cartHasWeighty() {
   return Object.keys(state.qty).some((id) => {
     const dish = dishById(id);
@@ -162,7 +189,14 @@ function render() {
     ? "Сбор заказов закрыт"
     : (state.menu.deadline ? `Принимаем до ${state.menu.deadline}` : "Заказы принимаются");
   $menu.innerHTML = "";
-  for (const cat of state.menu.categories) {
+  const categories = filteredCategories();
+  if (!categories.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = state.query.trim() ? "Ничего не найдено" : "Меню пустое";
+    $menu.appendChild(empty);
+  }
+  for (const cat of categories) {
     const wrap = document.createElement("section");
     wrap.className = "cat";
     const h2 = document.createElement("h2");
@@ -238,6 +272,11 @@ $card.addEventListener("click", (event) => {
 });
 $cardPhoto.addEventListener("error", () => {
   $cardPhoto.hidden = true;
+});
+
+$search.addEventListener("input", () => {
+  state.query = $search.value;
+  render();
 });
 
 $save.addEventListener("click", async () => {

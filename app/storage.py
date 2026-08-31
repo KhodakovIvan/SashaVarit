@@ -34,6 +34,23 @@ class Storage:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dish_names (
+                    dish_id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS admin_contacts (
+                    user_id INTEGER PRIMARY KEY,
+                    phone TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             await db.commit()
 
     async def upsert_order(self, day: date, user_id: int, user_name: str, items: dict[int, int]) -> None:
@@ -109,6 +126,52 @@ class Storage:
             cur = await db.execute("SELECT sent FROM days WHERE day=?", (day.isoformat(),))
             row = await cur.fetchone()
         return bool(row and row[0])
+
+    async def upsert_dish_names(self, names: dict[int, str]) -> None:
+        rows = [(int(dish_id), name.strip()) for dish_id, name in names.items() if str(name).strip()]
+        if not rows:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                """
+                INSERT INTO dish_names(dish_id, name) VALUES (?, ?)
+                ON CONFLICT(dish_id) DO UPDATE SET name=excluded.name
+                """,
+                rows,
+            )
+            await db.commit()
+
+    async def get_dish_names(self) -> dict[int, str]:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute("SELECT dish_id, name FROM dish_names")
+            rows = await cur.fetchall()
+        return {int(dish_id): str(name) for dish_id, name in rows}
+
+    async def set_admin_phone(self, user_id: int, phone: str) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO admin_contacts(user_id, phone, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    phone=excluded.phone,
+                    updated_at=datetime('now')
+                """,
+                (int(user_id), phone),
+            )
+            await db.commit()
+
+    async def get_admin_phone(self, user_id: int) -> str | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT phone FROM admin_contacts WHERE user_id=?",
+                (int(user_id),),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        phone = str(row[0]).strip()
+        return phone or None
 
     async def set_sent(self, day: date, sent: bool = True) -> None:
         async with aiosqlite.connect(self.db_path) as db:

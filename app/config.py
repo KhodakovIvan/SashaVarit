@@ -38,6 +38,8 @@ class Settings:
     smtp_password: str
     smtp_from: str
     order_email_to: str
+    delivery_address: str
+    delivery_comment: str
     deadline_hour: int
     deadline_minute: int
     deadline_enabled: bool
@@ -69,6 +71,8 @@ def load_settings() -> Settings:
         smtp_password=os.getenv("SMTP_PASSWORD", "").strip(),
         smtp_from=smtp_from,
         order_email_to=os.getenv("ORDER_EMAIL_TO", "mail@edatomsk.ru").strip(),
+        delivery_address=os.getenv("DELIVERY_ADDRESS", "").strip(),
+        delivery_comment=os.getenv("DELIVERY_COMMENT", "").strip(),
         deadline_hour=_int("DEADLINE_HOUR", 9),
         deadline_minute=_int("DEADLINE_MINUTE", 15),
         deadline_enabled=_bool("DEADLINE_ENABLED", False),

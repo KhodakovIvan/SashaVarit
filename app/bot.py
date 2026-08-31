@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import Command, Filter
+from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
@@ -19,6 +19,7 @@ from aiogram.types import (
     MenuButtonWebApp,
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     TelegramObject,
     User,
     WebAppInfo,
@@ -42,6 +43,8 @@ from app.domain import (
 )
 from app.edatomsk import build_filled_xls, site_date_key
 from app.mailer import send_order_email, smtp_configured
+from app.phone import format_phone, normalize_phone
+from app.telegram_auth import display_name
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -98,6 +101,33 @@ def menu_reply_keyboard(public_url: str) -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def phone_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Отправить номер телефона", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def user_label(user: User | None) -> str:
+    if not user:
+        return ""
+    return display_name(
+        {
+            "id": user.id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "username": user.username,
+        }
+    )
+
+
+def restore_menu_keyboard(ctx: Ctx) -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
+    if ctx.public_url:
+        return menu_reply_keyboard(ctx.public_url)
+    return ReplyKeyboardRemove()
 
 
 def menu_inline_keyboard(public_url: str) -> InlineKeyboardMarkup:
@@ -204,7 +234,8 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/summary — сводка за сегодня\n"
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
-            "/send — заполнить xls и отправить письмо"
+            "/send — заполнить xls и отправить письмо\n"
+            "/phone — контактный номер для письма на кухню"
         )
     if ctx.public_url:
         await message.answer(
@@ -234,6 +265,51 @@ async def cmd_menu(message: Message, ctx: Ctx) -> None:
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     await message.answer(f"Ваш Telegram id: {message.from_user.id}")
+
+
+@router.message(Command("phone"), CanManage())
+async def cmd_phone(message: Message, ctx: Ctx, command: CommandObject) -> None:
+    raw = (command.args or "").strip()
+    if raw:
+        phone = normalize_phone(raw)
+        if not phone:
+            await message.answer("Не похоже на номер. Пример: /phone +79131234567")
+            return
+        await ctx.storage.set_admin_phone(message.from_user.id, phone)
+        await message.answer(
+            f"Номер сохранён: {format_phone(phone)}\n"
+            "В письме на кухню уйдёт он, если заказ отправите вы.",
+            reply_markup=restore_menu_keyboard(ctx),
+        )
+        return
+    current = await ctx.storage.get_admin_phone(message.from_user.id)
+    now = f"Сейчас: {format_phone(current)}" if current else "Номер ещё не задан."
+    await message.answer(
+        f"{now}\n\nНажмите кнопку ниже или напишите /phone +79131234567",
+        reply_markup=phone_keyboard(),
+    )
+
+
+@router.message(F.contact)
+async def on_contact(message: Message, ctx: Ctx) -> None:
+    if not await can_manage(message.bot, ctx, message.from_user):
+        return
+    contact = message.contact
+    if contact is None:
+        return
+    if contact.user_id and contact.user_id != message.from_user.id:
+        await message.answer("Пришлите свой номер, не чужой.")
+        return
+    phone = normalize_phone(contact.phone_number or "")
+    if not phone:
+        await message.answer("Не удалось разобрать номер. Напишите /phone +79131234567")
+        return
+    await ctx.storage.set_admin_phone(message.from_user.id, phone)
+    await message.answer(
+        f"Номер сохранён: {format_phone(phone)}\n"
+        "В письме на кухню уйдёт он, если заказ отправите вы.",
+        reply_markup=restore_menu_keyboard(ctx),
+    )
 
 
 @router.message(Command("post"), CanManage())
@@ -300,6 +376,15 @@ async def cmd_send(message: Message, ctx: Ctx) -> None:
     if not orders:
         await message.answer("Некого отправлять: заказов нет.")
         return
+    if not ctx.settings.delivery_address:
+        await message.answer("В .env нет DELIVERY_ADDRESS. Без адреса доставки письмо не отправлю.")
+        return
+    if not await ctx.storage.get_admin_phone(message.from_user.id):
+        await message.answer(
+            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /phone +79131234567",
+            reply_markup=phone_keyboard(),
+        )
+        return
     bad = unavailable_in_orders(await ctx.cache.get(day), orders)
     if bad:
         await message.answer(format_unavailable_report(bad))
@@ -328,8 +413,19 @@ async def cb_send(cb: CallbackQuery, ctx: Ctx) -> None:
     if await ctx.storage.is_sent(day):
         await cb.answer("Уже отправлено")
         return
+    if not ctx.settings.delivery_address:
+        await cb.message.answer("В .env нет DELIVERY_ADDRESS. Без адреса доставки письмо не отправлю.")
+        await cb.answer("Нет адреса", show_alert=True)
+        return
+    if not await ctx.storage.get_admin_phone(cb.from_user.id):
+        await cb.message.answer(
+            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /phone +79131234567",
+            reply_markup=phone_keyboard(),
+        )
+        await cb.answer("Нет телефона", show_alert=True)
+        return
     try:
-        dry_run = await actually_send(cb.bot, ctx, day, notify_user_id=cb.from_user.id)
+        dry_run = await actually_send(cb.bot, ctx, day, sender=cb.from_user)
         await cb.message.edit_reply_markup(reply_markup=None)
         if dry_run:
             await cb.message.answer(
@@ -354,13 +450,19 @@ async def cb_send(cb: CallbackQuery, ctx: Ctx) -> None:
         await cb.answer("Ошибка", show_alert=True)
 
 
-async def actually_send(bot: Bot, ctx: Ctx, day: date, notify_user_id: int | None = None) -> bool:
+async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
     menu = await ctx.cache.get(day, force=True)
     if not ctx.cache.meta_ok:
         raise RuntimeError("Не удалось получить актуальное меню с сайта")
     orders = await ctx.storage.list_orders(day)
     if not orders:
         raise RuntimeError("Нет заказов")
+    address = ctx.settings.delivery_address
+    if not address:
+        raise RuntimeError("В .env не задан DELIVERY_ADDRESS")
+    phone = await ctx.storage.get_admin_phone(sender.id)
+    if not phone:
+        raise RuntimeError("Сначала сохраните номер: /phone")
     bad = unavailable_in_orders(menu, orders)
     if bad:
         raise UnavailableItemsError(format_unavailable_report(bad))
@@ -372,22 +474,29 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, notify_user_id: int | Non
         f"Заказ обедов {site_date_key(day.year, day.month, day.day)} / "
         f"{len(orders)} персон / {int(grand)} руб"
     )
+    body = email_body(
+        menu,
+        orders,
+        address=address,
+        address_comment=ctx.settings.delivery_comment,
+        contact_name=user_label(sender),
+        contact_phone=format_phone(phone),
+    )
     dry_run = not smtp_configured(ctx.settings)
     if dry_run:
         log.warning("SMTP не задан, письмо не отправляем, имитация отправки")
-        target = notify_user_id
-        if target:
-            await bot.send_document(
-                target,
-                BufferedInputFile(xls, filename=filename),
-                caption="Тест: SMTP пустой, на почту не отправлялось. Лист заказа во вложении.",
-            )
+        await bot.send_document(
+            sender.id,
+            BufferedInputFile(xls, filename=filename),
+            caption="Тест: SMTP пустой, на почту не отправлялось. Лист заказа во вложении.",
+        )
+        await bot.send_message(sender.id, "Текст письма:\n\n" + body[:3500])
     else:
         await asyncio.to_thread(
             send_order_email,
             ctx.settings,
             subject,
-            email_body(menu, orders),
+            body,
             xls,
             filename,
         )

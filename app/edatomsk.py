@@ -52,6 +52,7 @@ class DayMenu:
     title: str
     categories: list[Category]
     dishes_by_id: dict[int, Dish]
+    names_by_id: dict[int, str] = field(default_factory=dict)
 
 
 def site_date_key(year: int, month: int, day: int) -> str:
@@ -108,6 +109,7 @@ def parse_menu(xls_bytes: bytes, date_key: str) -> DayMenu:
     categories: list[Category] = []
     current: Category | None = None
     dishes_by_id: dict[int, Dish] = {}
+    names_by_id: dict[int, str] = {}
 
     for row in range(sheet.nrows):
         raw = str(sheet.cell_value(row, 0) or "").strip()
@@ -128,6 +130,7 @@ def parse_menu(xls_bytes: bytes, date_key: str) -> DayMenu:
             )
             current.dishes.append(dish)
             dishes_by_id[dish.id] = dish
+            names_by_id[dish.id] = dish.short_name
             continue
         if row == 0:
             continue
@@ -137,7 +140,13 @@ def parse_menu(xls_bytes: bytes, date_key: str) -> DayMenu:
         categories.append(current)
 
     categories = [cat for cat in categories if cat.dishes]
-    return DayMenu(date_key=date_key, title=title, categories=categories, dishes_by_id=dishes_by_id)
+    return DayMenu(
+        date_key=date_key,
+        title=title,
+        categories=categories,
+        dishes_by_id=dishes_by_id,
+        names_by_id=names_by_id,
+    )
 
 
 async def download_items_meta(date_key: str) -> dict[int, dict]:
@@ -151,7 +160,16 @@ async def download_items_meta(date_key: str) -> dict[int, dict]:
     return {int(k): v for k, v in raw.items()}
 
 
+def _meta_name(info: dict) -> str:
+    raw = unescape(str(info.get("name") or "")).replace("\xa0", " ").strip()
+    return raw
+
+
 def apply_item_meta(menu: DayMenu, meta: dict[int, dict]) -> None:
+    for dish_id, info in meta.items():
+        name = _meta_name(info)
+        if name:
+            menu.names_by_id.setdefault(dish_id, name)
     for dish_id, dish in menu.dishes_by_id.items():
         info = meta.get(dish_id) or {}
         if info.get("weighty"):
@@ -261,6 +279,10 @@ def menu_to_json(menu: DayMenu) -> dict:
     }
 
 
+def _a1(row: int, col: int) -> str:
+    return xlwt.Utils.rowcol_to_cell(row, col)
+
+
 def build_filled_xls(
     menu: DayMenu,
     people: list[tuple[str, dict[int, int]]],
@@ -276,47 +298,61 @@ def build_filled_xls(
     qty_style = xlwt.easyxf("align: horiz centre")
 
     n = len(people)
+    first_person_col = 2
+    last_person_col = 1 + n
+    total_col = 2 + n
     sheet.write(0, 0, menu.title, title_style)
     sheet.write(1, 0, "Наименование блюда", header_style)
     sheet.write(1, 1, "Цена", header_style)
     for i, (name, _) in enumerate(people):
         label = name or _to_roman(i + 1)
-        sheet.write(1, 2 + i, label, header_style)
-        sheet.col(2 + i).width = 4000
-    sheet.write(1, 2 + n, "Итого", header_style)
+        sheet.write(1, first_person_col + i, label, header_style)
+        sheet.col(first_person_col + i).width = 4000
+    sheet.write(1, total_col, "Итого", header_style)
     sheet.col(0).width = 18000
     sheet.col(1).width = 2500
-    sheet.col(2 + n).width = 3000
+    sheet.col(total_col).width = 3000
 
     row = 2
-    person_totals = [0.0] * n
+    dish_rows: list[int] = []
     for cat in menu.categories:
         sheet.write(row, 0, cat.name, cat_style)
         for i in range(n):
-            sheet.write(row, 2 + i, _to_roman(i + 1), cat_style)
+            sheet.write(row, first_person_col + i, _to_roman(i + 1), cat_style)
         row += 1
         for dish in cat.dishes:
             label = dish.raw_name
             if dish.weighty and not label.lstrip().startswith("*"):
                 label = "* " + label
             sheet.write(row, 0, label)
-            sheet.write(row, 1, f"~{int(dish.price)}" if dish.weighty else dish.price, money_style)
-            line_qty = 0
+            sheet.write(row, 1, dish.price, money_style)
             for i, (_, items) in enumerate(people):
                 qty = int(items.get(dish.id, 0) or 0)
                 if qty:
-                    sheet.write(row, 2 + i, qty, qty_style)
-                    person_totals[i] += qty * dish.price
-                    line_qty += qty
-            sheet.write(row, 2 + n, line_qty, qty_style)
+                    sheet.write(row, first_person_col + i, qty, qty_style)
+            if n:
+                qty_range = f"{_a1(row, first_person_col)}:{_a1(row, last_person_col)}"
+                sheet.write(
+                    row,
+                    total_col,
+                    xlwt.Formula(f"SUM({qty_range})*{_a1(row, 1)}"),
+                    money_style,
+                )
+            dish_rows.append(row)
             row += 1
 
-    sheet.write(row, 0, "Сумма, руб" + (" ≈" if any(d.weighty for d in menu.dishes_by_id.values()) else ""), cat_style)
-    grand = 0.0
-    for i, amount in enumerate(person_totals):
-        sheet.write(row, 2 + i, amount, money_style)
-        grand += amount
-    sheet.write(row, 2 + n, grand, money_style)
+    sheet.write(
+        row,
+        0,
+        "Сумма, руб" + (" ≈" if any(d.weighty for d in menu.dishes_by_id.values()) else ""),
+        cat_style,
+    )
+    if n and dish_rows:
+        for i in range(n):
+            terms = "+".join(f"{_a1(r, 1)}*{_a1(r, first_person_col + i)}" for r in dish_rows)
+            sheet.write(row, first_person_col + i, xlwt.Formula(terms), money_style)
+        total_range = f"{_a1(dish_rows[0], total_col)}:{_a1(dish_rows[-1], total_col)}"
+        sheet.write(row, total_col, xlwt.Formula(f"SUM({total_range})"), money_style)
 
     buf = BytesIO()
     book.save(buf)
