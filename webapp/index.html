@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Обед</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div id="title">Меню</div>
+    <div id="deadline"></div>
+  </header>
+  <div id="status"></div>
+  <main id="menu"></main>
+  <div id="card" class="card" hidden>
+    <div class="card-sheet">
+      <button type="button" class="card-close" id="card-close" aria-label="Закрыть">×</button>
+      <img id="card-photo" alt="" hidden>
+      <div id="card-name"></div>
+      <div id="card-meta"></div>
+      <div id="card-desc"></div>
+      <div id="card-bgu"></div>
+      <div class="card-actions">
+        <div class="qty" id="card-qty"></div>
+      </div>
+    </div>
+  </div>
+  <footer>
+    <div id="cart">
+      <div>
+        <div class="cart-label">Ваш заказ</div>
+        <div id="cart-sum">0 ₽</div>
+        <div id="cart-hint"></div>
+      </div>
+      <button id="save" type="button">Сохранить</button>
+    </div>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
