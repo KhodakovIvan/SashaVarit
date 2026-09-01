@@ -186,6 +186,20 @@ def drop_keyboard(day: date) -> InlineKeyboardMarkup:
     )
 
 
+def summary_clear_keyboard(day: date) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Файл и очистить",
+                    callback_data=f"clear:{day.isoformat()}",
+                ),
+                InlineKeyboardButton(text="Пока нет", callback_data="clear:cancel"),
+            ]
+        ]
+    )
+
+
 async def post_menu(bot: Bot, ctx: Ctx, day: date | None = None) -> None:
     if not ctx.settings.channel_id:
         raise RuntimeError("CHANNEL_ID не задан")
@@ -248,6 +262,7 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "\n\nКоманды администратора канала:\n"
             "/post — опубликовать меню в канал\n"
             "/summary — сводка за сегодня\n"
+            "/summary_clear — выгрузить xls и стереть заказы\n"
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
@@ -359,6 +374,80 @@ async def cmd_summary(message: Message, ctx: Ctx) -> None:
     bad = unavailable_in_orders(await ctx.cache.get(day), orders)
     if bad:
         await message.answer(format_unavailable_report(bad, sending=False))
+
+
+@router.message(Command("summary_clear"), CanManage())
+async def cmd_summary_clear(message: Message, ctx: Ctx) -> None:
+    day = today_in_tz(ctx.settings)
+    try:
+        summary, _, _, orders = await build_day_package(ctx, day, refresh=True)
+    except Exception as exc:
+        await message.answer(f"Не удалось получить меню с сайта: {exc}")
+        return
+    if not orders:
+        await message.answer("Заказов нет, очищать нечего.")
+        return
+    text = (
+        "Выгрузить XLS и стереть все заказы за сегодня?\n"
+        "Письмо на кухню не отправляю, сбор не закрываю.\n\n"
+        + summary[:3000]
+    )
+    if ctx.cache.meta_ok:
+        bad = unavailable_in_orders(await ctx.cache.get(day), orders)
+        if bad:
+            text += "\n\n" + format_unavailable_report(bad, sending=False)
+    await message.answer(text[:4000], reply_markup=summary_clear_keyboard(day))
+
+
+@router.callback_query(F.data == "clear:cancel")
+async def cb_summary_clear_cancel(cb: CallbackQuery, ctx: Ctx) -> None:
+    if not await can_manage(cb.bot, ctx, cb.from_user):
+        await cb.answer()
+        return
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith("clear:"))
+async def cb_summary_clear(cb: CallbackQuery, ctx: Ctx) -> None:
+    if not await can_manage(cb.bot, ctx, cb.from_user):
+        await cb.answer()
+        return
+    payload = cb.data.split(":", 1)[1]
+    if payload == "cancel":
+        return
+    day = date.fromisoformat(payload)
+    try:
+        summary, xls, filename, orders = await build_day_package(ctx, day, refresh=True)
+    except Exception as exc:
+        await cb.message.answer(f"Не удалось получить меню с сайта: {exc}")
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    if not orders:
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.message.answer("Заказов уже нет.")
+        await cb.answer("Пусто")
+        return
+    caption = (summary[:900] or "Пусто") + "\n\nЗаказы очищены."
+    try:
+        await cb.message.answer_document(
+            BufferedInputFile(xls, filename=filename),
+            caption=caption,
+        )
+    except Exception as exc:
+        log.exception("summary_clear document failed")
+        await cb.message.answer(f"Не удалось отправить файл, заказы не трогал: {exc}")
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    await ctx.storage.clear_orders(day)
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer("Очищено")
 
 
 @router.message(Command("close"), CanManage())
