@@ -54,11 +54,26 @@ def unavailable_in_orders(
     return result
 
 
+def strip_unavailable(
+    menu: DayMenu, items: dict[int, int]
+) -> tuple[dict[int, int], list[str]]:
+    kept: dict[int, int] = {}
+    dropped: list[str] = []
+    for dish_id, qty in items.items():
+        if not qty:
+            continue
+        if dish_is_available(menu, dish_id):
+            kept[dish_id] = qty
+        else:
+            dropped.append(dish_label(menu, dish_id))
+    return kept, dropped
+
+
 def format_unavailable_report(rows: list[tuple[str, list[str]]], *, sending: bool = True) -> str:
     if sending:
         lines = [
-            "Письмо не отправлено: на сайте нет части заказанных блюд.",
-            "Сбор не закрывал, заказчики могут поправить состав. Потом снова /send.",
+            "На сайте нет части заказанных блюд. Сбор не закрывал.",
+            "Можно подождать, пока люди поправят заказ, или убрать эти позиции и отправить без них.",
             "",
         ]
     else:
@@ -90,24 +105,24 @@ def has_weighty(menu: DayMenu, items: dict[int, int]) -> bool:
     )
 
 
-def format_items(menu: DayMenu, items: dict[int, int]) -> str:
+def format_items(menu: DayMenu, items: dict[int, int], *, prefix: str = "  ") -> str:
     lines = []
     for dish_id, qty in items.items():
         if not qty:
             continue
         dish = menu.dishes_by_id.get(dish_id)
         if not dish:
-            lines.append(f"  {dish_label(menu, dish_id)} × {qty} — нет на сайте")
+            lines.append(f"{prefix}{dish_label(menu, dish_id)} × {qty} — нет на сайте")
             continue
         amount = int(dish.price * qty)
         if dish.weighty:
-            line = f"  * {dish.short_name} × {qty} ≈ {amount} ₽ (вес, цена по факту)"
+            line = f"{prefix}* {dish.short_name} × {qty} ≈ {amount} ₽ (вес, цена по факту)"
         else:
-            line = f"  {dish.short_name} × {qty} = {amount} ₽"
+            line = f"{prefix}{dish.short_name} × {qty} = {amount} ₽"
         if not dish.available:
             line += " — нет на сайте"
         lines.append(line)
-    return "\n".join(lines) if lines else "  пусто"
+    return "\n".join(lines) if lines else f"{prefix}пусто"
 
 
 def _fmt_nutrient(value: float) -> str:
@@ -160,14 +175,35 @@ def _total_line(amount: float, approximate: bool) -> str:
     return f"Итого: {int(amount)} ₽"
 
 
+def format_dropped_notice(
+    menu: DayMenu, kept: dict[int, int], dropped: list[str]
+) -> str:
+    lines = ["Администратор убрал из заказа блюда, которых нет на сайте:"]
+    for name in dropped:
+        lines.append(f"— {name}")
+    if not kept:
+        lines.append("")
+        lines.append("Других позиций не было, заказ отменён.")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append("Осталось:")
+    lines.append(format_items(menu, kept, prefix=""))
+    lines.append("")
+    lines.append(_total_line(person_total(menu, kept), has_weighty(menu, kept)))
+    nutrition = format_nutrition_line(menu, kept)
+    if nutrition:
+        lines.append(nutrition)
+    return "\n".join(lines)
+
+
 def format_user_receipt(menu: DayMenu, items: dict[int, int]) -> str:
     amount = person_total(menu, items)
     if not items:
         return "Заказ очищен."
     lines = ["Заказ сохранён.", ""]
-    body = format_items(menu, items)
+    body = format_items(menu, items, prefix="")
     if body:
-        lines.append(body.lstrip())
+        lines.append(body)
         lines.append("")
     lines.append(_total_line(amount, has_weighty(menu, items)))
     nutrition = format_nutrition_line(menu, items)

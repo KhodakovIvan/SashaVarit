@@ -68,30 +68,6 @@ def _weight_from_raw(raw: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _to_roman(n: int) -> str:
-    pairs = (
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    )
-    out = []
-    for value, numeral in pairs:
-        while n >= value:
-            out.append(numeral)
-            n -= value
-    return "".join(out)
-
-
 async def download_xls(date_key: str, persons: int) -> bytes:
     params = urlencode({"date": date_key, "orders": persons})
     url = f"{XLS_URL}?{params}"
@@ -279,81 +255,104 @@ def menu_to_json(menu: DayMenu) -> dict:
     }
 
 
-def _a1(row: int, col: int) -> str:
-    return xlwt.Utils.rowcol_to_cell(row, col)
+def _copy_cell(sheet: xlwt.Worksheet, row: int, col: int, src) -> None:
+    ctype = src.cell_type(row, col)
+    if ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+        return
+    value = src.cell_value(row, col)
+    if ctype == xlrd.XL_CELL_ERROR:
+        return
+    if ctype == xlrd.XL_CELL_BOOLEAN:
+        sheet.write(row, col, bool(value))
+        return
+    if ctype == xlrd.XL_CELL_NUMBER:
+        sheet.write(row, col, value)
+        return
+    if value == "":
+        return
+    sheet.write(row, col, value)
 
 
-def build_filled_xls(
+def _totals_row_index(src) -> int | None:
+    for row in range(src.nrows - 1, -1, -1):
+        if str(src.cell_value(row, 0) or "").strip():
+            return None
+        for col in range(2, src.ncols):
+            if src.cell_type(row, col) == xlrd.XL_CELL_NUMBER:
+                return row
+    return None
+
+
+def fill_xls_template(xls_bytes: bytes, people: list[tuple[str, dict[int, int]]]) -> bytes:
+    """Fill official site XLS: keep sheet/headers/{id} names, write qty and sums as numbers."""
+    n = len(people)
+    src_book = xlrd.open_workbook(file_contents=xls_bytes, ignore_workbook_corruption=True)
+    src = src_book.sheet_by_index(0)
+    first_person_col = 2
+    total_col = 2 + n
+    if n and src.ncols < total_col + 1:
+        raise RuntimeError(
+            f"В шаблоне XLS {src.ncols} колонок, нужно минимум {total_col + 1} для {n} персон"
+        )
+
+    money_style = xlwt.easyxf("align: horiz right")
+    qty_style = xlwt.easyxf("align: horiz centre")
+    out = xlwt.Workbook(encoding="utf-8")
+    sheet = out.add_sheet(src.name[:31])
+    sheet.col(0).width = 18000
+    sheet.col(1).width = 2500
+    for i in range(n):
+        sheet.col(first_person_col + i).width = 4000
+    if n:
+        sheet.col(total_col).width = 3000
+
+    totals_row = _totals_row_index(src)
+    person_sums = [0.0] * n
+    grand = 0.0
+
+    for row in range(src.nrows):
+        raw = str(src.cell_value(row, 0) or "").strip()
+        dish = DISH_RE.match(raw)
+        is_totals = totals_row is not None and row == totals_row
+        for col in range(src.ncols):
+            if dish and n and first_person_col <= col <= first_person_col + n - 1:
+                continue
+            if dish and n and col == total_col:
+                continue
+            if is_totals and n and col >= first_person_col:
+                continue
+            _copy_cell(sheet, row, col, src)
+        if not dish or not n:
+            continue
+        price = float(src.cell_value(row, 1) or 0)
+        dish_id = int(dish.group(1))
+        row_sum = 0.0
+        for i, (_, items) in enumerate(people):
+            qty = int(items.get(dish_id, 0) or 0)
+            if not qty:
+                continue
+            sheet.write(row, first_person_col + i, qty, qty_style)
+            amount = qty * price
+            row_sum += amount
+            person_sums[i] += amount
+        sheet.write(row, total_col, row_sum, money_style)
+        grand += row_sum
+
+    if n and totals_row is not None:
+        for i, amount in enumerate(person_sums):
+            sheet.write(totals_row, first_person_col + i, amount, money_style)
+        sheet.write(totals_row, total_col, grand, money_style)
+
+    buf = BytesIO()
+    out.save(buf)
+    return buf.getvalue()
+
+
+async def build_filled_xls(
     menu: DayMenu,
     people: list[tuple[str, dict[int, int]]],
 ) -> bytes:
-    """people: [(display_name, {dish_id: qty}), ...]"""
-    book = xlwt.Workbook()
-    sheet = book.add_sheet("Лист заказа")
-
-    title_style = xlwt.easyxf("font: bold on, height 240")
-    header_style = xlwt.easyxf("font: bold on; align: wrap on, vert centre, horiz centre")
-    cat_style = xlwt.easyxf("font: bold on")
-    money_style = xlwt.easyxf("align: horiz right")
-    qty_style = xlwt.easyxf("align: horiz centre")
-
-    n = len(people)
-    first_person_col = 2
-    last_person_col = 1 + n
-    total_col = 2 + n
-    sheet.write(0, 0, menu.title, title_style)
-    sheet.write(1, 0, "Наименование блюда", header_style)
-    sheet.write(1, 1, "Цена", header_style)
-    for i, (name, _) in enumerate(people):
-        label = name or _to_roman(i + 1)
-        sheet.write(1, first_person_col + i, label, header_style)
-        sheet.col(first_person_col + i).width = 4000
-    sheet.write(1, total_col, "Итого", header_style)
-    sheet.col(0).width = 18000
-    sheet.col(1).width = 2500
-    sheet.col(total_col).width = 3000
-
-    row = 2
-    dish_rows: list[int] = []
-    for cat in menu.categories:
-        sheet.write(row, 0, cat.name, cat_style)
-        for i in range(n):
-            sheet.write(row, first_person_col + i, _to_roman(i + 1), cat_style)
-        row += 1
-        for dish in cat.dishes:
-            label = dish.raw_name
-            if dish.weighty and not label.lstrip().startswith("*"):
-                label = "* " + label
-            sheet.write(row, 0, label)
-            sheet.write(row, 1, dish.price, money_style)
-            for i, (_, items) in enumerate(people):
-                qty = int(items.get(dish.id, 0) or 0)
-                if qty:
-                    sheet.write(row, first_person_col + i, qty, qty_style)
-            if n:
-                qty_range = f"{_a1(row, first_person_col)}:{_a1(row, last_person_col)}"
-                sheet.write(
-                    row,
-                    total_col,
-                    xlwt.Formula(f"SUM({qty_range})*{_a1(row, 1)}"),
-                    money_style,
-                )
-            dish_rows.append(row)
-            row += 1
-
-    sheet.write(
-        row,
-        0,
-        "Сумма, руб" + (" ≈" if any(d.weighty for d in menu.dishes_by_id.values()) else ""),
-        cat_style,
-    )
-    if n and dish_rows:
-        for i in range(n):
-            terms = "+".join(f"{_a1(r, 1)}*{_a1(r, first_person_col + i)}" for r in dish_rows)
-            sheet.write(row, first_person_col + i, xlwt.Formula(terms), money_style)
-        total_range = f"{_a1(dish_rows[0], total_col)}:{_a1(dish_rows[-1], total_col)}"
-        sheet.write(row, total_col, xlwt.Formula(f"SUM({total_range})"), money_style)
-
-    buf = BytesIO()
-    book.save(buf)
-    return buf.getvalue()
+    """Download today's official XLS and fill person quantities."""
+    n = max(len(people), 1)
+    raw = await download_xls(menu.date_key, n)
+    return fill_xls_template(raw, people)

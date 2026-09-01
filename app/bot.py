@@ -34,10 +34,12 @@ from app.access import (
 from app.ctx import Ctx
 from app.domain import (
     email_body,
+    format_dropped_notice,
     format_summary,
     format_unavailable_report,
     is_weekday,
     person_total,
+    strip_unavailable,
     today_in_tz,
     unavailable_in_orders,
 )
@@ -170,6 +172,20 @@ def send_keyboard(day: date) -> InlineKeyboardMarkup:
     )
 
 
+def drop_keyboard(day: date) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Убрать снятые и продолжить",
+                    callback_data=f"send:drop:{day.isoformat()}",
+                )
+            ],
+            [InlineKeyboardButton(text="Пока нет", callback_data="send:cancel")],
+        ]
+    )
+
+
 async def post_menu(bot: Bot, ctx: Ctx, day: date | None = None) -> None:
     if not ctx.settings.channel_id:
         raise RuntimeError("CHANNEL_ID не задан")
@@ -217,7 +233,7 @@ async def build_day_package(ctx: Ctx, day: date, *, refresh: bool = False) -> tu
     menu = await ctx.cache.get(day, force=refresh)
     orders = await ctx.storage.list_orders(day)
     people = [(name, items) for _, name, items in orders]
-    xls = build_filled_xls(menu, people)
+    xls = await build_filled_xls(menu, people)
     summary = format_summary(menu, orders)
     filename = f"zakaz_{site_date_key(day.year, day.month, day.day).replace('.', '-')}.xls"
     return summary, xls, filename, orders
@@ -387,7 +403,7 @@ async def cmd_send(message: Message, ctx: Ctx) -> None:
         return
     bad = unavailable_in_orders(await ctx.cache.get(day), orders)
     if bad:
-        await message.answer(format_unavailable_report(bad))
+        await message.answer(format_unavailable_report(bad), reply_markup=drop_keyboard(day))
         return
     await message.answer(
         "Отправить лист заказа на mail@edatomsk.ru?\n\n" + summary[:3500],
@@ -404,12 +420,79 @@ async def cb_cancel(cb: CallbackQuery, ctx: Ctx) -> None:
     await cb.answer("Отменено")
 
 
+@router.callback_query(F.data.startswith("send:drop:"))
+async def cb_drop_unavailable(cb: CallbackQuery, ctx: Ctx) -> None:
+    if not await can_manage(cb.bot, ctx, cb.from_user):
+        await cb.answer()
+        return
+    day = date.fromisoformat(cb.data.rsplit(":", 1)[1])
+    if await ctx.storage.is_sent(day):
+        await cb.answer("Уже отправлено")
+        return
+    try:
+        menu = await ctx.cache.get(day, force=True)
+    except Exception as exc:
+        await cb.message.answer(f"Не удалось получить меню с сайта: {exc}")
+        await cb.answer("Ошибка", show_alert=True)
+        return
+    if not ctx.cache.meta_ok:
+        await cb.message.answer("Не удалось получить актуальное меню с сайта. Ничего не менял.")
+        await cb.answer("Нет меню", show_alert=True)
+        return
+    changes: list[tuple[int, dict[int, int], list[str]]] = []
+    for user_id, name, items in await ctx.storage.list_orders(day):
+        kept, dropped = strip_unavailable(menu, items)
+        if not dropped:
+            continue
+        if kept:
+            await ctx.storage.upsert_order(day, user_id, name, kept)
+        else:
+            await ctx.storage.delete_order(day, user_id)
+        changes.append((user_id, kept, dropped))
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if not changes:
+        await cb.answer("Снятых позиций уже нет")
+    else:
+        await cb.answer("Убрал снятые")
+    for user_id, kept, dropped in changes:
+        try:
+            await cb.bot.send_message(user_id, format_dropped_notice(menu, kept, dropped))
+        except (TelegramForbiddenError, TelegramBadRequest):
+            log.info("Не удалось написать пользователю %s про снятые блюда", user_id)
+        except Exception:
+            log.exception("Не удалось написать пользователю %s про снятые блюда", user_id)
+    orders = await ctx.storage.list_orders(day)
+    if not orders:
+        await cb.message.answer("После снятия позиций заказов не осталось. Письмо не отправлял.")
+        return
+    bad = unavailable_in_orders(menu, orders)
+    if bad:
+        await cb.message.answer(format_unavailable_report(bad), reply_markup=drop_keyboard(day))
+        return
+    summary = format_summary(menu, orders)
+    note = (
+        f"Убрал снятые блюда ({sum(len(d) for _, _, d in changes)} поз. у {len(changes)}).\n\n"
+        if changes
+        else ""
+    )
+    await cb.message.answer(
+        note + "Отправить лист заказа на mail@edatomsk.ru?\n\n" + summary[:3500],
+        reply_markup=send_keyboard(day),
+    )
+
+
 @router.callback_query(F.data.startswith("send:"))
 async def cb_send(cb: CallbackQuery, ctx: Ctx) -> None:
     if not await can_manage(cb.bot, ctx, cb.from_user):
         await cb.answer()
         return
-    day = date.fromisoformat(cb.data.split(":", 1)[1])
+    payload = cb.data.split(":", 1)[1]
+    if payload == "cancel" or payload.startswith("drop:"):
+        return
+    day = date.fromisoformat(payload)
     if await ctx.storage.is_sent(day):
         await cb.answer("Уже отправлено")
         return
@@ -442,7 +525,8 @@ async def cb_send(cb: CallbackQuery, ctx: Ctx) -> None:
             await cb.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await cb.message.answer(str(exc))
+        day = date.fromisoformat(cb.data.split(":", 1)[1])
+        await cb.message.answer(str(exc), reply_markup=drop_keyboard(day))
         await cb.answer("Есть недоступные блюда", show_alert=True)
     except Exception as exc:
         log.exception("send failed")
@@ -467,7 +551,7 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
     if bad:
         raise UnavailableItemsError(format_unavailable_report(bad))
     people = [(name, items) for _, name, items in orders]
-    xls = build_filled_xls(menu, people)
+    xls = await build_filled_xls(menu, people)
     filename = f"zakaz_{site_date_key(day.year, day.month, day.day).replace('.', '-')}.xls"
     grand = sum(person_total(menu, items) for _, _, items in orders)
     subject = (
