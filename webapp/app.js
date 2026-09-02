@@ -294,12 +294,7 @@ $save.addEventListener("click", async () => {
     setStatus(text);
     if (tg) {
       try { tg.HapticFeedback.notificationOccurred("success"); } catch (e) {}
-      const close = () => { try { tg.close(); } catch (e) {} };
-      const short = data.total
-        ? `${cartHasWeighty() ? "Заказ сохранён ≈ " : "Заказ сохранён, "}${Math.round(data.total)} ₽`
-        : "Заказ очищен";
-      if (typeof tg.showAlert === "function") tg.showAlert(short, close);
-      else close();
+      try { tg.close(); } catch (e) {}
     }
   } catch (err) {
     setStatus(err.message || String(err), true);

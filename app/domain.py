@@ -241,18 +241,25 @@ def email_body(
     contact_phone: str,
 ) -> str:
     header = [
+        "Добрый день,",
+        "лист заказа во вложении.",
+        "",
         menu.title,
-        f"Персон: {len(orders)}",
         "",
         f"Доставка: {address}",
     ]
     if address_comment:
         header.append(address_comment)
     header.append(f"Контакт: {contact_name}, {contact_phone}")
-    return (
-        "\n".join(header)
-        + "\n\n"
-        + f"{format_summary(menu, orders)}\n\n"
-        "Лист заказа во вложении.\n"
-        "Отправлено ботом SashaVarit."
+    header.append("Приборы не требуются")
+    grand = sum(person_total(menu, items) for _, _, items in orders)
+    any_weighty = any(has_weighty(menu, items) for _, _, items in orders)
+    return "\n".join(
+        [
+            "\n".join(header),
+            "",
+            _total_line(grand, any_weighty) + f", персон: {len(orders)}",
+            "",
+            "Отправлено ботом SashaVarit.",
+        ]
     )
