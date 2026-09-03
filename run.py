@@ -87,7 +87,10 @@ async def main() -> None:
     if ctx.public_url:
         await setup_bot_menu_button(bot, ctx.public_url)
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(
+            bot,
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"],
+        )
     except Exception as exc:
         msg = str(exc)
         if "Couldn't connect to proxy" in msg or "ProxyConnectionError" in type(exc).__name__:

@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject, Filter
 from aiogram.types import (
@@ -23,6 +23,7 @@ from aiogram.types import (
     TelegramObject,
     User,
     WebAppInfo,
+    ChatMemberUpdated,
 )
 
 from app.access import (
@@ -90,19 +91,42 @@ class ChannelMemberMiddleware(BaseMiddleware):
                 elif isinstance(event, Message) and event.chat.type == "private":
                     await event.answer(NOT_IN_CHANNEL)
                 return None
+            try:
+                await ctx.storage.upsert_roster(user.id, user_label(user))
+            except Exception:
+                log.exception("Не удалось запомнить пользователя %s", user.id)
         return await handler(event, data)
+
+
+_IN_CHANNEL = {
+    ChatMemberStatus.CREATOR,
+    ChatMemberStatus.ADMINISTRATOR,
+    ChatMemberStatus.MEMBER,
+    ChatMemberStatus.RESTRICTED,
+}
+
+
+def _same_chat(chat_id: int, channel_id: str) -> bool:
+    return str(chat_id) == str(channel_id).strip()
+
+
+@router.chat_member()
+async def on_channel_member(event: ChatMemberUpdated, ctx: Ctx) -> None:
+    if not ctx.settings.channel_id or not _same_chat(event.chat.id, ctx.settings.channel_id):
+        return
+    member = event.new_chat_member
+    user = member.user
+    if user is None or user.is_bot:
+        return
+    status = ChatMemberStatus(member.status)
+    if status in _IN_CHANNEL:
+        await ctx.storage.upsert_roster(user.id, user_label(user))
+        return
+    await ctx.storage.delete_roster(user.id)
 
 
 def menu_webapp_url(public_url: str) -> str:
     return public_url.rstrip("/") + "/"
-
-
-def menu_reply_keyboard(public_url: str) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Открыть меню", web_app=WebAppInfo(url=menu_webapp_url(public_url)))]],
-        resize_keyboard=True,
-        is_persistent=True,
-    )
 
 
 def phone_keyboard() -> ReplyKeyboardMarkup:
@@ -126,12 +150,6 @@ def user_label(user: User | None) -> str:
     )
 
 
-def restore_menu_keyboard(ctx: Ctx) -> ReplyKeyboardMarkup | ReplyKeyboardRemove:
-    if ctx.public_url:
-        return menu_reply_keyboard(ctx.public_url)
-    return ReplyKeyboardRemove()
-
-
 def menu_inline_keyboard(public_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -140,16 +158,23 @@ def menu_inline_keyboard(public_url: str) -> InlineKeyboardMarkup:
     )
 
 
-async def setup_bot_menu_button(bot: Bot, public_url: str) -> None:
+def _menu_button(public_url: str) -> MenuButtonWebApp:
+    return MenuButtonWebApp(
+        text="Меню",
+        web_app=WebAppInfo(url=menu_webapp_url(public_url)),
+    )
+
+
+async def setup_bot_menu_button(bot: Bot, public_url: str, *, chat_id: int | None = None) -> None:
     try:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Меню",
-                web_app=WebAppInfo(url=menu_webapp_url(public_url)),
-            )
-        )
+        await bot.set_chat_menu_button(chat_id=chat_id, menu_button=_menu_button(public_url))
     except Exception as exc:
-        log.warning("Кнопка меню у поля ввода не поставилась: %s", exc)
+        target = f"чата {chat_id}" if chat_id else "по умолчанию"
+        log.warning("Кнопка меню у поля ввода (%s) не обновилась: %s", target, exc)
+
+
+async def refresh_user_menu(bot: Bot, public_url: str, chat_id: int) -> None:
+    await setup_bot_menu_button(bot, public_url, chat_id=chat_id)
 
 
 async def channel_keyboard(bot: Bot) -> InlineKeyboardMarkup:
@@ -198,6 +223,33 @@ def summary_clear_keyboard(day: date) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def split_telegram_text(text: str, limit: int = 4000) -> list[str]:
+    text = (text or "").strip() or "Пусто"
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    rest = text
+    while rest:
+        if len(rest) <= limit:
+            chunks.append(rest)
+            break
+        cut = rest.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = rest.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    return chunks
+
+
+async def answer_long(target: Message, text: str, *, reply_markup=None) -> None:
+    chunks = split_telegram_text(text)
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        await target.answer(chunk, reply_markup=reply_markup if i == last else None)
 
 
 async def post_menu(bot: Bot, ctx: Ctx, day: date | None = None) -> None:
@@ -263,21 +315,20 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/post — опубликовать меню в канал\n"
             "/summary — сводка за сегодня\n"
             "/summary_clear — выгрузить xls и стереть заказы\n"
+            "/missing — кто из известных не заказал\n"
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
             "/phone — контактный номер для письма на кухню"
         )
     if ctx.public_url:
+        await refresh_user_menu(message.bot, ctx.public_url, message.chat.id)
         await message.answer(
             "Заказ обеда с edatomsk.ru.\n"
-            "Кнопка «Открыть меню» — под этим сообщением." + extra,
+            "«Открыть меню» — под сообщением, «Меню» — слева от поля ввода." + extra,
             reply_markup=menu_inline_keyboard(ctx.public_url),
         )
-        await message.answer(
-            "Если под сообщением пусто, меню ещё внизу экрана, над полем ввода.",
-            reply_markup=menu_reply_keyboard(ctx.public_url),
-        )
+        await message.answer("\u2060", reply_markup=ReplyKeyboardRemove())
     else:
         await message.answer("Мини-приложение ещё не поднято (нет HTTPS)." + extra)
 
@@ -287,6 +338,7 @@ async def cmd_menu(message: Message, ctx: Ctx) -> None:
     if not ctx.public_url:
         await message.answer("Мини-приложение ещё не поднято.")
         return
+    await refresh_user_menu(message.bot, ctx.public_url, message.chat.id)
     await message.answer(
         "Открыть меню:",
         reply_markup=menu_inline_keyboard(ctx.public_url),
@@ -310,7 +362,7 @@ async def cmd_phone(message: Message, ctx: Ctx, command: CommandObject) -> None:
         await message.answer(
             f"Номер сохранён: {format_phone(phone)}\n"
             "В письме на кухню уйдёт он, если заказ отправите вы.",
-            reply_markup=restore_menu_keyboard(ctx),
+            reply_markup=ReplyKeyboardRemove(),
         )
         return
     current = await ctx.storage.get_admin_phone(message.from_user.id)
@@ -339,7 +391,7 @@ async def on_contact(message: Message, ctx: Ctx) -> None:
     await message.answer(
         f"Номер сохранён: {format_phone(phone)}\n"
         "В письме на кухню уйдёт он, если заказ отправите вы.",
-        reply_markup=restore_menu_keyboard(ctx),
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
@@ -364,16 +416,54 @@ async def cmd_summary(message: Message, ctx: Ctx) -> None:
     except Exception as exc:
         await message.answer(f"Не удалось получить меню с сайта: {exc}")
         return
-    await message.answer_document(
-        BufferedInputFile(xls, filename=filename),
-        caption=summary[:1000] or "Пусто",
-    )
+    await message.answer_document(BufferedInputFile(xls, filename=filename))
+    await answer_long(message, summary or "Пусто")
     if not ctx.cache.meta_ok:
         await message.answer("Не удалось проверить доступность блюд на сайте.")
         return
     bad = unavailable_in_orders(await ctx.cache.get(day), orders)
     if bad:
         await message.answer(format_unavailable_report(bad, sending=False))
+
+
+@router.message(Command("missing"), CanManage())
+async def cmd_missing(message: Message, ctx: Ctx) -> None:
+    day = today_in_tz(ctx.settings)
+    ordered = {uid for uid, _, _ in await ctx.storage.list_orders(day)}
+    roster = await ctx.storage.list_roster()
+    names: list[str] = []
+    still_in = 0
+    if ctx.settings.channel_id:
+        for uid, name in roster:
+            if not await is_channel_member(message.bot, ctx.settings.channel_id, uid):
+                continue
+            still_in += 1
+            if uid not in ordered:
+                names.append(name)
+    channel_total = 0
+    if ctx.settings.channel_id:
+        try:
+            channel_total = await message.bot.get_chat_member_count(ctx.settings.channel_id)
+        except Exception:
+            log.exception("Не удалось получить число подписчиков канала")
+    note = (
+        "Telegram не отдаёт имена всех подписчиков канала, только их число. "
+        "Бот запоминает тех, кто вошёл в канал, пока он админ, плюс кто открывал меню или писал в личку."
+    )
+    if channel_total:
+        note = f"Подписчиков в канале: {channel_total}. Известно боту и всё ещё в канале: {still_in}.\n{note}"
+    if not roster:
+        await message.answer(note + "\n\nПока никого в списке нет.")
+        return
+    if not names:
+        await message.answer(
+            note + f"\n\nВсе известные подписчики заказали: {len(ordered)} из {still_in}."
+        )
+        return
+    await answer_long(
+        message,
+        note + f"\n\nБез заказа сегодня ({len(names)} из {still_in} известных):\n" + "\n".join(names),
+    )
 
 
 @router.message(Command("summary_clear"), CanManage())
@@ -390,13 +480,13 @@ async def cmd_summary_clear(message: Message, ctx: Ctx) -> None:
     text = (
         "Выгрузить XLS и стереть все заказы за сегодня?\n"
         "Письмо на кухню не отправляю, сбор не закрываю.\n\n"
-        + summary[:3000]
+        + (summary or "Пусто")
     )
     if ctx.cache.meta_ok:
         bad = unavailable_in_orders(await ctx.cache.get(day), orders)
         if bad:
             text += "\n\n" + format_unavailable_report(bad, sending=False)
-    await message.answer(text[:4000], reply_markup=summary_clear_keyboard(day))
+    await answer_long(message, text, reply_markup=summary_clear_keyboard(day))
 
 
 @router.callback_query(F.data == "clear:cancel")
@@ -431,12 +521,9 @@ async def cb_summary_clear(cb: CallbackQuery, ctx: Ctx) -> None:
         await cb.message.answer("Заказов уже нет.")
         await cb.answer("Пусто")
         return
-    caption = (summary[:900] or "Пусто") + "\n\nЗаказы очищены."
     try:
-        await cb.message.answer_document(
-            BufferedInputFile(xls, filename=filename),
-            caption=caption,
-        )
+        await cb.message.answer_document(BufferedInputFile(xls, filename=filename))
+        await answer_long(cb.message, (summary or "Пусто") + "\n\nЗаказы очищены.")
     except Exception as exc:
         log.exception("summary_clear document failed")
         await cb.message.answer(f"Не удалось отправить файл, заказы не трогал: {exc}")
@@ -494,8 +581,9 @@ async def cmd_send(message: Message, ctx: Ctx) -> None:
     if bad:
         await message.answer(format_unavailable_report(bad), reply_markup=drop_keyboard(day))
         return
-    await message.answer(
-        "Отправить лист заказа на mail@edatomsk.ru?\n\n" + summary[:3500],
+    await answer_long(
+        message,
+        "Отправить лист заказа на mail@edatomsk.ru?\n\n" + (summary or "Пусто"),
         reply_markup=send_keyboard(day),
     )
 
@@ -567,8 +655,9 @@ async def cb_drop_unavailable(cb: CallbackQuery, ctx: Ctx) -> None:
         if changes
         else ""
     )
-    await cb.message.answer(
-        note + "Отправить лист заказа на mail@edatomsk.ru?\n\n" + summary[:3500],
+    await answer_long(
+        cb.message,
+        note + "Отправить лист заказа на mail@edatomsk.ru?\n\n" + (summary or "Пусто"),
         reply_markup=send_keyboard(day),
     )
 
@@ -685,6 +774,8 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
             BufferedInputFile(xls, filename=filename),
             caption=caption,
         )
+        for chunk in split_telegram_text(format_summary(menu, orders)):
+            await bot.send_message(ctx.settings.channel_id, chunk)
     return dry_run
 
 
@@ -697,11 +788,14 @@ async def notify_deadline(bot: Bot, ctx: Ctx) -> None:
     if not recipients:
         return
     summary, _, _, orders = await build_day_package(ctx, day)
-    text = "Дедлайн. Сбор закрыт.\n\n" + summary
+    text = "Дедлайн. Сбор закрыт.\n\n" + (summary or "Пусто")
     markup = send_keyboard(day) if orders else None
     for uid in recipients:
         try:
-            await bot.send_message(uid, text[:4000], reply_markup=markup)
+            chunks = split_telegram_text(text)
+            last = len(chunks) - 1
+            for i, chunk in enumerate(chunks):
+                await bot.send_message(uid, chunk, reply_markup=markup if i == last else None)
         except (TelegramForbiddenError, TelegramBadRequest):
             log.info("Не удалось написать администратору %s", uid)
 

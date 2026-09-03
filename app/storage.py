@@ -51,6 +51,15 @@ class Storage:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS roster (
+                    user_id INTEGER PRIMARY KEY,
+                    user_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             await db.commit()
 
     async def upsert_order(self, day: date, user_id: int, user_name: str, items: dict[int, int]) -> None:
@@ -146,6 +155,34 @@ class Storage:
             cur = await db.execute("SELECT dish_id, name FROM dish_names")
             rows = await cur.fetchall()
         return {int(dish_id): str(name) for dish_id, name in rows}
+
+    async def upsert_roster(self, user_id: int, user_name: str) -> None:
+        name = (user_name or "").strip() or str(int(user_id))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO roster(user_id, user_name, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    user_name=excluded.user_name,
+                    updated_at=datetime('now')
+                """,
+                (int(user_id), name),
+            )
+            await db.commit()
+
+    async def list_roster(self) -> list[tuple[int, str]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT user_id, user_name FROM roster ORDER BY user_name, user_id"
+            )
+            rows = await cur.fetchall()
+        return [(int(user_id), str(user_name)) for user_id, user_name in rows]
+
+    async def delete_roster(self, user_id: int) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM roster WHERE user_id=?", (int(user_id),))
+            await db.commit()
 
     async def set_admin_phone(self, user_id: int, phone: str) -> None:
         async with aiosqlite.connect(self.db_path) as db:

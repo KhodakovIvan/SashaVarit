@@ -16,6 +16,7 @@ MENU_PAGE_URL = "https://www.edatomsk.ru/"
 PHOTO_BASE = "https://www.edatomsk.ru/images/delivery/items/"
 DISH_RE = re.compile(r"^\{(\d+)\}\s*(.+)$", re.DOTALL)
 WEIGHT_IN_NAME_RE = re.compile(r"\(([^)]*г[^)]*)\)\s*$")
+COMP_WEIGHT_TAIL_RE = re.compile(r",\s*~?\s*\d[\d.,]*\s*г\s*$", re.IGNORECASE)
 ITEM_BLOCK_RE = re.compile(
     r'<div class="menulistItem"(?:\s+id="\d+")?>(.*?)(?=<div class="menulistItem"|$)',
     re.DOTALL | re.IGNORECASE,
@@ -63,6 +64,19 @@ def _short_name(rest: str) -> str:
     return rest.split(" (")[0].replace("\n", " ").replace("\r", " ").strip()
 
 
+def _composition_from_rest(rest: str) -> str:
+    idx = rest.find(" (")
+    if idx < 0:
+        return ""
+    inner = rest[idx + 2 :].strip()
+    close = inner.rfind(")")
+    if close >= 0:
+        inner = inner[:close]
+    inner = COMP_WEIGHT_TAIL_RE.sub("", inner).strip()
+    lines = [ln.strip() for ln in inner.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return "\n".join(ln for ln in lines if ln)
+
+
 def _weight_from_raw(raw: str) -> str:
     match = WEIGHT_IN_NAME_RE.search(raw.replace("\n", " ").replace("\r", " "))
     return match.group(1).strip() if match else ""
@@ -103,6 +117,7 @@ def parse_menu(xls_bytes: bytes, date_key: str) -> DayMenu:
                 price=float(sheet.cell_value(row, 1) or 0),
                 weighty="*" in match.group(2)[:3],
                 weight=_weight_from_raw(match.group(2)),
+                description=_composition_from_rest(match.group(2)),
             )
             current.dishes.append(dish)
             dishes_by_id[dish.id] = dish
