@@ -60,6 +60,17 @@ class Storage:
                 )
                 """
             )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skips (
+                    day TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (day, user_id)
+                )
+                """
+            )
             await db.commit()
 
     async def upsert_order(self, day: date, user_id: int, user_name: str, items: dict[int, int]) -> None:
@@ -75,6 +86,10 @@ class Storage:
                     updated_at=datetime('now')
                 """,
                 (day.isoformat(), user_id, user_name, json.dumps(clean, ensure_ascii=False)),
+            )
+            await db.execute(
+                "DELETE FROM skips WHERE day=? AND user_id=?",
+                (day.isoformat(), int(user_id)),
             )
             await db.execute("INSERT OR IGNORE INTO days(day) VALUES (?)", (day.isoformat(),))
             await db.commit()
@@ -116,7 +131,54 @@ class Storage:
     async def clear_orders(self, day: date) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("DELETE FROM orders WHERE day=?", (day.isoformat(),))
+            await db.execute("DELETE FROM skips WHERE day=?", (day.isoformat(),))
             await db.commit()
+
+    async def set_skip(self, day: date, user_id: int, user_name: str) -> None:
+        name = (user_name or "").strip() or str(int(user_id))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM orders WHERE day=? AND user_id=?",
+                (day.isoformat(), int(user_id)),
+            )
+            await db.execute(
+                """
+                INSERT INTO skips(day, user_id, user_name, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(day, user_id) DO UPDATE SET
+                    user_name=excluded.user_name,
+                    updated_at=datetime('now')
+                """,
+                (day.isoformat(), int(user_id), name),
+            )
+            await db.execute("INSERT OR IGNORE INTO days(day) VALUES (?)", (day.isoformat(),))
+            await db.commit()
+
+    async def clear_skip(self, day: date, user_id: int) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM skips WHERE day=? AND user_id=?",
+                (day.isoformat(), int(user_id)),
+            )
+            await db.commit()
+
+    async def list_skips(self, day: date) -> list[tuple[int, str]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT user_id, user_name FROM skips WHERE day=? ORDER BY user_name, user_id",
+                (day.isoformat(),),
+            )
+            rows = await cur.fetchall()
+        return [(int(user_id), str(user_name)) for user_id, user_name in rows]
+
+    async def is_skip(self, day: date, user_id: int) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT 1 FROM skips WHERE day=? AND user_id=?",
+                (day.isoformat(), int(user_id)),
+            )
+            row = await cur.fetchone()
+        return bool(row)
 
     async def is_closed(self, day: date) -> bool:
         async with aiosqlite.connect(self.db_path) as db:

@@ -38,6 +38,7 @@ from app.domain import (
     format_dropped_notice,
     format_summary,
     format_unavailable_report,
+    is_after_deadline,
     is_weekday,
     person_total,
     strip_unavailable,
@@ -153,7 +154,8 @@ def user_label(user: User | None) -> str:
 def menu_inline_keyboard(public_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть меню", web_app=WebAppInfo(url=menu_webapp_url(public_url)))]
+            [InlineKeyboardButton(text="Открыть меню", web_app=WebAppInfo(url=menu_webapp_url(public_url)))],
+            [InlineKeyboardButton(text="Пропускаю", callback_data="skip:today")],
         ]
     )
 
@@ -315,7 +317,7 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/post — опубликовать меню в канал\n"
             "/summary — сводка за сегодня\n"
             "/summary_clear — выгрузить xls и стереть заказы\n"
-            "/missing — кто из известных не заказал\n"
+            "/missing — кто не ответил и кто пропустил\n"
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
@@ -325,12 +327,19 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
         await refresh_user_menu(message.bot, ctx.public_url, message.chat.id)
         await message.answer(
             "Заказ обеда с edatomsk.ru.\n"
-            "«Открыть меню» — под сообщением, «Меню» — слева от поля ввода." + extra,
+            "«Открыть меню» — под сообщением, «Меню» — слева от поля ввода.\n"
+            "Если обед сегодня не нужен — нажмите «Пропускаю»." + extra,
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await message.answer(
+            "Выберите действие:",
             reply_markup=menu_inline_keyboard(ctx.public_url),
         )
-        await message.answer("\u2060", reply_markup=ReplyKeyboardRemove())
     else:
-        await message.answer("Мини-приложение ещё не поднято (нет HTTPS)." + extra)
+        await message.answer(
+            "Мини-приложение ещё не поднято (нет HTTPS)." + extra,
+            reply_markup=ReplyKeyboardRemove(),
+        )
 
 
 @router.message(Command("menu"))
@@ -340,8 +349,33 @@ async def cmd_menu(message: Message, ctx: Ctx) -> None:
         return
     await refresh_user_menu(message.bot, ctx.public_url, message.chat.id)
     await message.answer(
-        "Открыть меню:",
+        "Выберите действие:",
         reply_markup=menu_inline_keyboard(ctx.public_url),
+    )
+
+
+@router.callback_query(F.data == "skip:today")
+async def cb_skip_today(cb: CallbackQuery, ctx: Ctx) -> None:
+    if not cb.from_user or cb.from_user.is_bot:
+        await cb.answer()
+        return
+    day = today_in_tz(ctx.settings)
+    if await ctx.storage.is_sent(day):
+        await cb.answer("Заказ на сегодня уже отправлен", show_alert=True)
+        return
+    if await ctx.storage.is_closed(day) or is_after_deadline(ctx.settings, day):
+        await cb.answer("Сбор заказов закрыт", show_alert=True)
+        return
+    name = user_label(cb.from_user)
+    await ctx.storage.set_skip(day, cb.from_user.id, name)
+    try:
+        await ctx.storage.upsert_roster(cb.from_user.id, name)
+    except Exception:
+        log.exception("Не удалось запомнить пользователя %s", cb.from_user.id)
+    await cb.answer("Ок, обед пропускаете")
+    await cb.message.answer(
+        "Отметил: сегодня без обеда.\n"
+        "Если передумаете — откройте меню и сохраните заказ."
     )
 
 
@@ -406,6 +440,34 @@ async def cmd_post(message: Message, ctx: Ctx) -> None:
         )
     except Exception as exc:
         await message.answer(f"Не удалось опубликовать: {exc}")
+        return
+    if smtp_configured(ctx.settings):
+        return
+    day = today_in_tz(ctx.settings)
+    try:
+        menu = await ctx.cache.get(day)
+        orders = await ctx.storage.list_orders(day)
+    except Exception as exc:
+        await message.answer(
+            "SMTP не настроен — письмо на кухню пока не уйдёт.\n"
+            f"Текст письма показать не смог: {exc}"
+        )
+        return
+    phone = await ctx.storage.get_admin_phone(message.from_user.id)
+    body = email_body(
+        menu,
+        orders,
+        address=ctx.settings.delivery_address or "(DELIVERY_ADDRESS не задан)",
+        address_comment=ctx.settings.delivery_comment,
+        contact_name=user_label(message.from_user),
+        contact_phone=format_phone(phone) if phone else "(номер не задан, /phone)",
+    )
+    await answer_long(
+        message,
+        "SMTP не настроен (SMTP_USER / SMTP_PASSWORD). "
+        "Письмо на mail@edatomsk.ru пока не уйдёт.\n\n"
+        "Текст письма:\n\n" + body,
+    )
 
 
 @router.message(Command("summary"), CanManage())
@@ -430,16 +492,27 @@ async def cmd_summary(message: Message, ctx: Ctx) -> None:
 async def cmd_missing(message: Message, ctx: Ctx) -> None:
     day = today_in_tz(ctx.settings)
     ordered = {uid for uid, _, _ in await ctx.storage.list_orders(day)}
+    skipped = dict(await ctx.storage.list_skips(day))
     roster = await ctx.storage.list_roster()
-    names: list[str] = []
+    silent: list[str] = []
+    skipped_names: list[str] = []
     still_in = 0
+    seen: set[int] = set()
     if ctx.settings.channel_id:
-        for uid, name in roster:
+        candidates = list(roster) + [(uid, name) for uid, name in skipped.items()]
+        for uid, name in candidates:
+            if uid in seen:
+                continue
             if not await is_channel_member(message.bot, ctx.settings.channel_id, uid):
                 continue
+            seen.add(uid)
             still_in += 1
-            if uid not in ordered:
-                names.append(name)
+            if uid in ordered:
+                continue
+            if uid in skipped:
+                skipped_names.append(skipped[uid] or name)
+            else:
+                silent.append(name)
     channel_total = 0
     if ctx.settings.channel_id:
         try:
@@ -452,18 +525,25 @@ async def cmd_missing(message: Message, ctx: Ctx) -> None:
     )
     if channel_total:
         note = f"Подписчиков в канале: {channel_total}. Известно боту и всё ещё в канале: {still_in}.\n{note}"
-    if not roster:
+    if not roster and not skipped:
         await message.answer(note + "\n\nПока никого в списке нет.")
         return
-    if not names:
-        await message.answer(
-            note + f"\n\nВсе известные подписчики заказали: {len(ordered)} из {still_in}."
-        )
-        return
-    await answer_long(
-        message,
-        note + f"\n\nБез заказа сегодня ({len(names)} из {still_in} известных):\n" + "\n".join(names),
-    )
+    parts = [note, ""]
+    if not silent and not skipped_names:
+        parts.append(f"Все известные откликнулись: заказали {len(ordered)} из {still_in}.")
+    else:
+        if skipped_names:
+            parts.append(
+                f"Пропустили обед ({len(skipped_names)}):\n" + "\n".join(skipped_names)
+            )
+            parts.append("")
+        if silent:
+            parts.append(
+                f"Ещё без ответа ({len(silent)} из {still_in} известных):\n" + "\n".join(silent)
+            )
+        else:
+            parts.append("Без ответа никого из известных нет.")
+    await answer_long(message, "\n".join(parts).rstrip())
 
 
 @router.message(Command("summary_clear"), CanManage())
