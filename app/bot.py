@@ -247,11 +247,85 @@ def split_telegram_text(text: str, limit: int = 4000) -> list[str]:
     return chunks
 
 
+def compose_summary_message(
+    summary: str,
+    *,
+    lead: str = "",
+    trail: str = "",
+) -> tuple[str, str | None]:
+    """Сводка: сворачиваемая цитата, если в теле ≥ 3 строк."""
+    body = (summary or "").strip() or "Пусто"
+    lead = (lead or "").strip()
+    trail = (trail or "").strip()
+    use_quote = len(body.splitlines()) >= 3
+    if use_quote:
+        parts: list[str] = []
+        if lead:
+            parts.append(html.escape(lead))
+        parts.append(f"<blockquote expandable>{html.escape(body)}</blockquote>")
+        if trail:
+            parts.append(html.escape(trail))
+        return "\n\n".join(parts), ParseMode.HTML
+    parts = [p for p in (lead, body, trail) if p]
+    return "\n\n".join(parts), None
+
+
 async def answer_long(target: Message, text: str, *, reply_markup=None) -> None:
     chunks = split_telegram_text(text)
     last = len(chunks) - 1
     for i, chunk in enumerate(chunks):
         await target.answer(chunk, reply_markup=reply_markup if i == last else None)
+
+
+async def answer_summary(
+    target: Message,
+    summary: str,
+    *,
+    lead: str = "",
+    trail: str = "",
+    reply_markup=None,
+) -> None:
+    body = (summary or "").strip() or "Пусто"
+    overhead = len("<blockquote expandable></blockquote>") + len(lead) + len(trail) + 10
+    limit = max(1500, 4000 - overhead)
+    chunks = split_telegram_text(body, limit=limit)
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        text, mode = compose_summary_message(
+            chunk,
+            lead=lead if i == 0 else "",
+            trail=trail if i == last else "",
+        )
+        kwargs: dict[str, Any] = {"reply_markup": reply_markup if i == last else None}
+        if mode:
+            kwargs["parse_mode"] = mode
+        await target.answer(text, **kwargs)
+
+
+async def send_summary(
+    bot: Bot,
+    chat_id: int,
+    summary: str,
+    *,
+    lead: str = "",
+    trail: str = "",
+    reply_markup=None,
+) -> None:
+    body = (summary or "").strip() or "Пусто"
+    overhead = len("<blockquote expandable></blockquote>") + len(lead) + len(trail) + 10
+    limit = max(1500, 4000 - overhead)
+    chunks = split_telegram_text(body, limit=limit)
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        text, mode = compose_summary_message(
+            chunk,
+            lead=lead if i == 0 else "",
+            trail=trail if i == last else "",
+        )
+        kwargs: dict[str, Any] = {"reply_markup": reply_markup if i == last else None}
+        if mode:
+            kwargs["parse_mode"] = mode
+        await bot.send_message(chat_id, text, **kwargs)
 
 
 async def post_menu(bot: Bot, ctx: Ctx, day: date | None = None) -> None:
@@ -317,7 +391,7 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/post — опубликовать меню в канал\n"
             "/summary — сводка за сегодня\n"
             "/summary_clear — выгрузить xls и стереть заказы\n"
-            "/missing — кто не ответил и кто пропустил\n"
+            "/status — кто заказал, пропустил или молчит\n"
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
@@ -479,7 +553,7 @@ async def cmd_summary(message: Message, ctx: Ctx) -> None:
         await message.answer(f"Не удалось получить меню с сайта: {exc}")
         return
     await message.answer_document(BufferedInputFile(xls, filename=filename))
-    await answer_long(message, summary or "Пусто")
+    await answer_summary(message, summary or "Пусто")
     if not ctx.cache.meta_ok:
         await message.answer("Не удалось проверить доступность блюд на сайте.")
         return
@@ -488,18 +562,24 @@ async def cmd_summary(message: Message, ctx: Ctx) -> None:
         await message.answer(format_unavailable_report(bad, sending=False))
 
 
-@router.message(Command("missing"), CanManage())
-async def cmd_missing(message: Message, ctx: Ctx) -> None:
+@router.message(Command("status", "missing"), CanManage())
+async def cmd_status(message: Message, ctx: Ctx) -> None:
     day = today_in_tz(ctx.settings)
-    ordered = {uid for uid, _, _ in await ctx.storage.list_orders(day)}
+    orders = await ctx.storage.list_orders(day)
+    ordered_map = {uid: name for uid, name, _ in orders}
     skipped = dict(await ctx.storage.list_skips(day))
     roster = await ctx.storage.list_roster()
+    ordered_names: list[str] = []
     silent: list[str] = []
     skipped_names: list[str] = []
     still_in = 0
     seen: set[int] = set()
     if ctx.settings.channel_id:
-        candidates = list(roster) + [(uid, name) for uid, name in skipped.items()]
+        candidates = list(roster)
+        for uid, name in ordered_map.items():
+            candidates.append((uid, name))
+        for uid, name in skipped.items():
+            candidates.append((uid, name))
         for uid, name in candidates:
             if uid in seen:
                 continue
@@ -507,12 +587,15 @@ async def cmd_missing(message: Message, ctx: Ctx) -> None:
                 continue
             seen.add(uid)
             still_in += 1
-            if uid in ordered:
-                continue
-            if uid in skipped:
+            if uid in ordered_map:
+                ordered_names.append(ordered_map[uid] or name)
+            elif uid in skipped:
                 skipped_names.append(skipped[uid] or name)
             else:
                 silent.append(name)
+        ordered_names.sort(key=str.casefold)
+        skipped_names.sort(key=str.casefold)
+        silent.sort(key=str.casefold)
     channel_total = 0
     if ctx.settings.channel_id:
         try:
@@ -524,26 +607,29 @@ async def cmd_missing(message: Message, ctx: Ctx) -> None:
         "Бот запоминает тех, кто вошёл в канал, пока он админ, плюс кто открывал меню или писал в личку."
     )
     if channel_total:
-        note = f"Подписчиков в канале: {channel_total}. Известно боту и всё ещё в канале: {still_in}.\n{note}"
-    if not roster and not skipped:
+        note = (
+            f"Подписчиков в канале: {channel_total}. "
+            f"Известно боту и всё ещё в канале: {still_in}.\n{note}"
+        )
+    if not roster and not skipped and not ordered_map:
         await message.answer(note + "\n\nПока никого в списке нет.")
         return
-    parts = [note, ""]
-    if not silent and not skipped_names:
-        parts.append(f"Все известные откликнулись: заказали {len(ordered)} из {still_in}.")
-    else:
-        if skipped_names:
-            parts.append(
-                f"Пропустили обед ({len(skipped_names)}):\n" + "\n".join(skipped_names)
-            )
-            parts.append("")
-        if silent:
-            parts.append(
-                f"Ещё без ответа ({len(silent)} из {still_in} известных):\n" + "\n".join(silent)
-            )
-        else:
-            parts.append("Без ответа никого из известных нет.")
-    await answer_long(message, "\n".join(parts).rstrip())
+
+    def block(title: str, names: list[str]) -> str:
+        if not names:
+            return f"{title} (0): —"
+        return f"{title} ({len(names)}):\n" + "\n".join(names)
+
+    body_parts = [
+        block("Заказали", ordered_names),
+        block("Пропустили", skipped_names),
+        block("Без ответа", silent),
+    ]
+    await answer_summary(
+        message,
+        "\n\n".join(body_parts),
+        lead=note,
+    )
 
 
 @router.message(Command("summary_clear"), CanManage())
@@ -557,16 +643,21 @@ async def cmd_summary_clear(message: Message, ctx: Ctx) -> None:
     if not orders:
         await message.answer("Заказов нет, очищать нечего.")
         return
-    text = (
-        "Выгрузить XLS и стереть все заказы за сегодня?\n"
-        "Письмо на кухню не отправляю, сбор не закрываю.\n\n"
-        + (summary or "Пусто")
-    )
+    trail = ""
     if ctx.cache.meta_ok:
         bad = unavailable_in_orders(await ctx.cache.get(day), orders)
         if bad:
-            text += "\n\n" + format_unavailable_report(bad, sending=False)
-    await answer_long(message, text, reply_markup=summary_clear_keyboard(day))
+            trail = format_unavailable_report(bad, sending=False)
+    await answer_summary(
+        message,
+        summary or "Пусто",
+        lead=(
+            "Выгрузить XLS и стереть все заказы за сегодня?\n"
+            "Письмо на кухню не отправляю, сбор не закрываю."
+        ),
+        trail=trail,
+        reply_markup=summary_clear_keyboard(day),
+    )
 
 
 @router.callback_query(F.data == "clear:cancel")
@@ -603,7 +694,11 @@ async def cb_summary_clear(cb: CallbackQuery, ctx: Ctx) -> None:
         return
     try:
         await cb.message.answer_document(BufferedInputFile(xls, filename=filename))
-        await answer_long(cb.message, (summary or "Пусто") + "\n\nЗаказы очищены.")
+        await answer_summary(
+            cb.message,
+            summary or "Пусто",
+            trail="Заказы очищены.",
+        )
     except Exception as exc:
         log.exception("summary_clear document failed")
         await cb.message.answer(f"Не удалось отправить файл, заказы не трогал: {exc}")
@@ -661,9 +756,10 @@ async def cmd_send(message: Message, ctx: Ctx) -> None:
     if bad:
         await message.answer(format_unavailable_report(bad), reply_markup=drop_keyboard(day))
         return
-    await answer_long(
+    await answer_summary(
         message,
-        "Отправить лист заказа на mail@edatomsk.ru?\n\n" + (summary or "Пусто"),
+        summary or "Пусто",
+        lead="Отправить лист заказа на mail@edatomsk.ru?",
         reply_markup=send_keyboard(day),
     )
 
@@ -735,9 +831,10 @@ async def cb_drop_unavailable(cb: CallbackQuery, ctx: Ctx) -> None:
         if changes
         else ""
     )
-    await answer_long(
+    await answer_summary(
         cb.message,
-        note + "Отправить лист заказа на mail@edatomsk.ru?\n\n" + (summary or "Пусто"),
+        summary or "Пусто",
+        lead=note + "Отправить лист заказа на mail@edatomsk.ru?",
         reply_markup=send_keyboard(day),
     )
 
@@ -854,8 +951,7 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
             BufferedInputFile(xls, filename=filename),
             caption=caption,
         )
-        for chunk in split_telegram_text(format_summary(menu, orders)):
-            await bot.send_message(ctx.settings.channel_id, chunk)
+        await send_summary(bot, ctx.settings.channel_id, format_summary(menu, orders))
     return dry_run
 
 
@@ -868,14 +964,16 @@ async def notify_deadline(bot: Bot, ctx: Ctx) -> None:
     if not recipients:
         return
     summary, _, _, orders = await build_day_package(ctx, day)
-    text = "Дедлайн. Сбор закрыт.\n\n" + (summary or "Пусто")
     markup = send_keyboard(day) if orders else None
     for uid in recipients:
         try:
-            chunks = split_telegram_text(text)
-            last = len(chunks) - 1
-            for i, chunk in enumerate(chunks):
-                await bot.send_message(uid, chunk, reply_markup=markup if i == last else None)
+            await send_summary(
+                bot,
+                uid,
+                summary or "Пусто",
+                lead="Дедлайн. Сбор закрыт.",
+                reply_markup=markup,
+            )
         except (TelegramForbiddenError, TelegramBadRequest):
             log.info("Не удалось написать администратору %s", uid)
 
