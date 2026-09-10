@@ -155,6 +155,7 @@ button.info {
   font-size: 14px;
   line-height: 1.4;
   margin-top: 10px;
+  white-space: pre-line;
 }
 #card-bgu {
   font-size: 12px;

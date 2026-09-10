@@ -115,6 +115,10 @@ def create_http_app(settings: Settings, storage: Storage, cache: MenuCache) -> w
             else ""
         )
         items = await storage.get_order(day, int(user["id"]))
+        try:
+            await storage.upsert_roster(int(user["id"]), display_name(user))
+        except Exception:
+            log.exception("Не удалось запомнить пользователя Mini App")
         payload["my"] = {str(k): v for k, v in items.items()}
         missing = [
             {
@@ -154,6 +158,10 @@ def create_http_app(settings: Settings, storage: Storage, cache: MenuCache) -> w
                 items[dish_id] = min(count, 99)
         name = display_name(user)
         user_id = int(user["id"])
+        try:
+            await storage.upsert_roster(user_id, name)
+        except Exception:
+            log.exception("Не удалось запомнить пользователя Mini App")
         if items:
             await storage.upsert_order(day, user_id, name, items)
         else:
