@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from datetime import date
 from typing import Any, Awaitable, Callable
 
@@ -46,17 +47,28 @@ from app.domain import (
     unavailable_in_orders,
 )
 from app.edatomsk import build_filled_xls, site_date_key
-from app.mailer import send_order_email, smtp_configured
+from app.mailer import send_order_email, send_text_email, smtp_configured, smtp_ready
 from app.phone import format_phone, normalize_phone
 from app.telegram_auth import display_name
 
 log = logging.getLogger(__name__)
 router = Router()
 
+_pending_testmail: set[int] = set()
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 class UnavailableItemsError(Exception):
     """Заказанные блюда больше недоступны на сайте."""
 
+
+class WaitingTestMail(Filter):
+    async def __call__(self, message: Message) -> bool:
+        user = message.from_user
+        if not user or user.id not in _pending_testmail:
+            return False
+        text = (message.text or "").strip()
+        return bool(text) and not text.startswith("/")
 
 async def can_manage(bot: Bot, ctx: Ctx, user: User | None) -> bool:
     if not user or user.is_bot or not ctx.settings.channel_id:
@@ -395,6 +407,7 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/close — закрыть сбор\n"
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
+            "/testmail — проверить SMTP тестовым письмом\n"
             "/phone — контактный номер для письма на кухню"
         )
     if ctx.public_url:
@@ -456,6 +469,73 @@ async def cb_skip_today(cb: CallbackQuery, ctx: Ctx) -> None:
 @router.message(Command("id"))
 async def cmd_id(message: Message) -> None:
     await message.answer(f"Ваш Telegram id: {message.from_user.id}")
+
+
+async def _send_test_mail(message: Message, ctx: Ctx, raw_to: str) -> None:
+    to = raw_to.strip().lower()
+    if not _EMAIL_RE.match(to):
+        await message.answer("Не похоже на email. Пример: name@mail.ru")
+        return
+    if not smtp_ready(ctx.settings):
+        await message.answer("SMTP не настроен: нужен SMTP_USER / SMTP_PASSWORD / SMTP_FROM в .env")
+        return
+    body = (
+        "Тестовое письмо от бота SashaVarit.\n"
+        f"От: {ctx.settings.smtp_from}\n"
+        f"SMTP: {ctx.settings.smtp_host}:{ctx.settings.smtp_port}\n"
+        "Если это письмо дошло — отправка настроена верно."
+    )
+    try:
+        await asyncio.to_thread(
+            send_text_email,
+            ctx.settings,
+            to=to,
+            subject="SashaVarit: тест SMTP",
+            body=body,
+        )
+    except Exception as exc:
+        log.exception("testmail failed")
+        await message.answer(f"Не удалось отправить: {exc}")
+        return
+    await message.answer(
+        f"Тестовое письмо отправлено на {to}.\n"
+        f"Отправитель: {ctx.settings.smtp_from}"
+    )
+
+
+@router.message(Command("testmail"), CanManage())
+async def cmd_testmail(message: Message, ctx: Ctx, command: CommandObject) -> None:
+    if not smtp_ready(ctx.settings):
+        await message.answer("SMTP не настроен: нужен SMTP_USER / SMTP_PASSWORD / SMTP_FROM в .env")
+        return
+    raw = (command.args or "").strip()
+    if raw:
+        _pending_testmail.discard(message.from_user.id)
+        await _send_test_mail(message, ctx, raw)
+        return
+    _pending_testmail.add(message.from_user.id)
+    await message.answer(
+        f"Отправитель: {ctx.settings.smtp_from}\n"
+        f"SMTP: {ctx.settings.smtp_host}:{ctx.settings.smtp_port}\n\n"
+        "Напишите email получателя тестового письма.\n"
+        "Или сразу: /testmail name@mail.ru\n"
+        "Отмена: /cancel"
+    )
+
+
+@router.message(Command("cancel"), CanManage())
+async def cmd_cancel(message: Message) -> None:
+    if message.from_user.id in _pending_testmail:
+        _pending_testmail.discard(message.from_user.id)
+        await message.answer("Отменено.")
+        return
+    await message.answer("Нечего отменять.")
+
+
+@router.message(WaitingTestMail(), F.text, CanManage())
+async def on_testmail_address(message: Message, ctx: Ctx) -> None:
+    _pending_testmail.discard(message.from_user.id)
+    await _send_test_mail(message, ctx, message.text or "")
 
 
 @router.message(Command("phone"), CanManage())

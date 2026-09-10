@@ -61,16 +61,22 @@ Quick tunnel каждый запуск дает новый URL. Для пост�
 
 ### Почта
 
-Письмо уходит только если заданы `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` (если `SMTP_FROM` пустой, подставляется `SMTP_USER`) и `ORDER_EMAIL_TO`. Иначе `/send` имитирует отправку: XLS собирается, в канал и организатору уходит, на кухню нет.
+Письмо уходит только если заданы `SMTP_USER`, пароль (`SMTP_PASSWORD` или `IMAP_PASSWORD`), `SMTP_FROM` (если `SMTP_FROM` пустой, подставляется `SMTP_USER`) и `ORDER_EMAIL_TO`. Иначе `/send` имитирует отправку: XLS собирается, в канал и организатору уходит, на кухню нет.
+
+После SMTP бот по возможности кладёт копию в «Отправленные» через IMAP (Mail.ru сам это часто не делает).
 
 | Переменная | По умолчанию | Зачем |
 |---|---|---|
-| `SMTP_HOST` | `smtp.yandex.ru` | SMTP-сервер |
+| `SMTP_HOST` | `smtp.mail.ru` | SMTP-сервер |
 | `SMTP_PORT` | `587` | Порт, соединение STARTTLS |
 | `SMTP_USER` | пусто | Логин |
-| `SMTP_PASSWORD` | пусто | Пароль приложения, не обычный пароль Яндекса |
+| `SMTP_PASSWORD` | пусто | Пароль для SMTP; если пустой — берётся `IMAP_PASSWORD` |
 | `SMTP_FROM` | как `SMTP_USER` | Поле From |
 | `ORDER_EMAIL_TO` | `mail@edatomsk.ru` | Куда слать заказ |
+| `IMAP_HOST` | для mail.ru — `imap.mail.ru` | IMAP для копии в «Отправленные» |
+| `IMAP_PORT` | `993` | IMAP SSL |
+| `IMAP_USER` | как `SMTP_USER` | Логин IMAP |
+| `IMAP_PASSWORD` | пусто | Пароль IMAP; если пустой — берётся `SMTP_PASSWORD` |
 
 ### Доставка
 
@@ -137,4 +143,5 @@ copy .env.example .env
 | `/close` | Закрыть сбор |
 | `/open` | Открыть сбор и разрешить `/send` снова |
 | `/send` | Сверка с сайтом, сводка, подтверждение. Если блюдо сняли — кнопка убрать его из заказов |
+| `/testmail` | Проверить SMTP: бот просит email получателя и шлёт тестовое письмо без вложения. Можно сразу `/testmail name@mail.ru` |
 | `/phone` | Сохранить свой номер для письма. Без него `/send` не отправит |
