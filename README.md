@@ -122,6 +122,27 @@ copy .env.example .env
 
 После смены Python-кода процесс перезапустить. Файлы в `webapp/` отдаются с диска, достаточно заново открыть Mini App.
 
+### Автозапуск на Windows (PowerShell)
+
+В `scripts/`:
+
+| Скрипт | Назначение |
+|---|---|
+| `start-bot.ps1` | Запуск с перезапуском при падении, лог в `logs/bot.log` |
+| `stop-bot.ps1` | Остановить процесс бота |
+| `restart-bot.ps1` | Stop + start в фоне |
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-bot.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop-bot.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\restart-bot.ps1
+```
+
+При входе в систему: Планировщик заданий → триггер «При входе» →  
+`powershell.exe` с аргументами  
+`-NoProfile -ExecutionPolicy Bypass -File "D:\git\SashaVarit\scripts\start-bot.ps1"`  
+(путь подставьте свой). Одновременно не запускайте второй экземпляр вручную.
+
 ## Команды
 
 В личке, для подписчика канала:
