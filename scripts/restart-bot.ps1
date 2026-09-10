@@ -1,4 +1,4 @@
-# Перезапуск бота: stop + start в скрытом окне PowerShell.
+﻿# Restart bot: stop, then start in a hidden PowerShell window.
 
 $ErrorActionPreference = "Stop"
 $Start = Join-Path $PSScriptRoot "start-bot.ps1"
@@ -12,4 +12,5 @@ Start-Process -FilePath "powershell.exe" -ArgumentList @(
     "-File", $Start
 ) -WindowStyle Hidden
 
-Write-Host "Бот перезапускается в фоне. Лог: $(Join-Path (Split-Path $PSScriptRoot -Parent) 'logs\bot.log')"
+$Log = Join-Path (Split-Path $PSScriptRoot -Parent) "logs\bot.log"
+Write-Host "Bot restarting in background. Log: $Log"

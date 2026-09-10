@@ -1,6 +1,6 @@
-# Запуск бота SashaVarit с автоперезапуском при падении.
-# Лог: <корень>/logs/bot.log
-# Автозапуск: Планировщик заданий → powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\scripts\start-bot.ps1"
+﻿# Start SashaVarit bot with auto-restart on exit.
+# Log: <repo>/logs/bot.log
+# Autostart: Task Scheduler -> powershell.exe -NoProfile -ExecutionPolicy Bypass -File "...\scripts\start-bot.ps1"
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
@@ -10,10 +10,10 @@ $LogDir = Join-Path $Root "logs"
 $Log = Join-Path $LogDir "bot.log"
 
 if (-not (Test-Path $Python)) {
-    throw "Нет $Python — создайте .venv и выполните: .\.venv\Scripts\pip install -r requirements.txt"
+    throw "Missing $Python - create .venv and run: .\.venv\Scripts\pip install -r requirements.txt"
 }
 if (-not (Test-Path $RunPy)) {
-    throw "Нет $RunPy"
+    throw "Missing $RunPy"
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -26,11 +26,11 @@ $busy = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='python
         $_.CommandLine.Contains($Root)
     }
 if ($busy) {
-    Write-Host "Бот уже запущен (PID $($busy.ProcessId -join ', ')). Выход."
+    Write-Host "Bot already running (PID $($busy.ProcessId -join ', ')). Exit."
     exit 0
 }
 
-Write-Host "Старт бота из $Root (лог: $Log). Ctrl+C в этом окне остановит цикл перезапуска."
+Write-Host "Starting bot from $Root (log: $Log). Ctrl+C stops the restart loop."
 while ($true) {
     "$(Get-Date -Format o) START" | Add-Content -Path $Log -Encoding utf8
     & $Python $RunPy *>> $Log
