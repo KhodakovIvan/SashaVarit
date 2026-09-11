@@ -46,11 +46,18 @@ class Storage:
                 """
                 CREATE TABLE IF NOT EXISTS admin_contacts (
                     user_id INTEGER PRIMARY KEY,
-                    phone TEXT NOT NULL,
+                    phone TEXT NOT NULL DEFAULT '',
+                    email TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            try:
+                await db.execute(
+                    "ALTER TABLE admin_contacts ADD COLUMN email TEXT NOT NULL DEFAULT ''"
+                )
+            except Exception:
+                pass
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS roster (
@@ -250,8 +257,8 @@ class Storage:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                INSERT INTO admin_contacts(user_id, phone, updated_at)
-                VALUES (?, ?, datetime('now'))
+                INSERT INTO admin_contacts(user_id, phone, email, updated_at)
+                VALUES (?, ?, '', datetime('now'))
                 ON CONFLICT(user_id) DO UPDATE SET
                     phone=excluded.phone,
                     updated_at=datetime('now')
@@ -271,6 +278,44 @@ class Storage:
             return None
         phone = str(row[0]).strip()
         return phone or None
+
+    async def set_admin_email(self, user_id: int, email: str) -> None:
+        mail = (email or "").strip()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO admin_contacts(user_id, phone, email, updated_at)
+                VALUES (?, '', ?, datetime('now'))
+                ON CONFLICT(user_id) DO UPDATE SET
+                    email=excluded.email,
+                    updated_at=datetime('now')
+                """,
+                (int(user_id), mail),
+            )
+            await db.commit()
+
+    async def get_admin_email(self, user_id: int) -> str | None:
+        async with aiosqlite.connect(self.db_path) as db:
+            cur = await db.execute(
+                "SELECT email FROM admin_contacts WHERE user_id=?",
+                (int(user_id),),
+            )
+            row = await cur.fetchone()
+        if not row:
+            return None
+        mail = str(row[0]).strip()
+        return mail or None
+
+    async def clear_admin_email(self, user_id: int) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE admin_contacts SET email='', updated_at=datetime('now')
+                WHERE user_id=?
+                """,
+                (int(user_id),),
+            )
+            await db.commit()
 
     async def set_sent(self, day: date, sent: bool = True) -> None:
         async with aiosqlite.connect(self.db_path) as db:

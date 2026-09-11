@@ -1,4 +1,4 @@
-# Остановка процесса бота (python с run.py из этой установки).
+﻿# Stop SashaVarit bot process (python running run.py from this install).
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path $PSScriptRoot -Parent
@@ -11,12 +11,12 @@ $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pytho
     }
 
 if (-not $procs) {
-    Write-Host "Бот не найден среди процессов python."
+    Write-Host "Bot process not found."
     exit 0
 }
 
 foreach ($p in $procs) {
-    Write-Host "Останавливаю PID $($p.ProcessId)"
+    Write-Host "Stopping PID $($p.ProcessId)"
     Stop-Process -Id $p.ProcessId -Force
 }
-Write-Host "Готово."
+Write-Host "Done."

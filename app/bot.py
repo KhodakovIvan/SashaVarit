@@ -408,7 +408,8 @@ async def cmd_start(message: Message, ctx: Ctx) -> None:
             "/open — открыть сбор снова\n"
             "/send — заполнить xls и отправить письмо\n"
             "/testmail — проверить SMTP тестовым письмом\n"
-            "/phone — контактный номер для письма на кухню"
+            "/myphone — контактный номер для письма на кухню\n"
+            "/mymail — почта админа (копия письма на кухню)"
         )
     if ctx.public_url:
         await refresh_user_menu(message.bot, ctx.public_url, message.chat.id)
@@ -538,13 +539,13 @@ async def on_testmail_address(message: Message, ctx: Ctx) -> None:
     await _send_test_mail(message, ctx, message.text or "")
 
 
-@router.message(Command("phone"), CanManage())
-async def cmd_phone(message: Message, ctx: Ctx, command: CommandObject) -> None:
+@router.message(Command("myphone"), CanManage())
+async def cmd_myphone(message: Message, ctx: Ctx, command: CommandObject) -> None:
     raw = (command.args or "").strip()
     if raw:
         phone = normalize_phone(raw)
         if not phone:
-            await message.answer("Не похоже на номер. Пример: /phone +79131234567")
+            await message.answer("Не похоже на номер. Пример: /myphone +79131234567")
             return
         await ctx.storage.set_admin_phone(message.from_user.id, phone)
         await message.answer(
@@ -556,9 +557,41 @@ async def cmd_phone(message: Message, ctx: Ctx, command: CommandObject) -> None:
     current = await ctx.storage.get_admin_phone(message.from_user.id)
     now = f"Сейчас: {format_phone(current)}" if current else "Номер ещё не задан."
     await message.answer(
-        f"{now}\n\nНажмите кнопку ниже или напишите /phone +79131234567",
+        f"{now}\n\nНажмите кнопку ниже или напишите /myphone +79131234567",
         reply_markup=phone_keyboard(),
     )
+
+
+@router.message(Command("mymail"), CanManage())
+async def cmd_mymail(message: Message, ctx: Ctx, command: CommandObject) -> None:
+    raw = (command.args or "").strip()
+    if raw.lower() in {"clear", "удалить", "-", "none", "off"}:
+        await ctx.storage.clear_admin_email(message.from_user.id)
+        await message.answer("Почта для копии письма снята.")
+        return
+    if raw:
+        mail = raw.lower()
+        if not _EMAIL_RE.match(mail):
+            await message.answer("Не похоже на email. Пример: /mymail name@mail.ru")
+            return
+        await ctx.storage.set_admin_email(message.from_user.id, mail)
+        await message.answer(
+            f"Почта сохранена: {mail}\n"
+            "При /send она уйдёт в копию (Cc) письма на кухню."
+        )
+        return
+    current = await ctx.storage.get_admin_email(message.from_user.id)
+    if current:
+        await message.answer(
+            f"Сейчас в копии: {current}\n\n"
+            "Сменить: /mymail name@mail.ru\n"
+            "Убрать: /mymail clear"
+        )
+    else:
+        await message.answer(
+            "Почта для копии ещё не задана.\n"
+            "Пример: /mymail name@mail.ru"
+        )
 
 
 @router.message(F.contact)
@@ -573,7 +606,7 @@ async def on_contact(message: Message, ctx: Ctx) -> None:
         return
     phone = normalize_phone(contact.phone_number or "")
     if not phone:
-        await message.answer("Не удалось разобрать номер. Напишите /phone +79131234567")
+        await message.answer("Не удалось разобрать номер. Напишите /myphone +79131234567")
         return
     await ctx.storage.set_admin_phone(message.from_user.id, phone)
     await message.answer(
@@ -614,7 +647,7 @@ async def cmd_post(message: Message, ctx: Ctx) -> None:
         address=ctx.settings.delivery_address or "(DELIVERY_ADDRESS не задан)",
         address_comment=ctx.settings.delivery_comment,
         contact_name=user_label(message.from_user),
-        contact_phone=format_phone(phone) if phone else "(номер не задан, /phone)",
+        contact_phone=format_phone(phone) if phone else "(номер не задан, /myphone)",
     )
     await answer_long(
         message,
@@ -828,7 +861,7 @@ async def cmd_send(message: Message, ctx: Ctx) -> None:
         return
     if not await ctx.storage.get_admin_phone(message.from_user.id):
         await message.answer(
-            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /phone +79131234567",
+            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /myphone +79131234567",
             reply_markup=phone_keyboard(),
         )
         return
@@ -937,7 +970,7 @@ async def cb_send(cb: CallbackQuery, ctx: Ctx) -> None:
         return
     if not await ctx.storage.get_admin_phone(cb.from_user.id):
         await cb.message.answer(
-            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /phone +79131234567",
+            "Для письма нужен ваш контактный номер. Нажмите кнопку или напишите /myphone +79131234567",
             reply_markup=phone_keyboard(),
         )
         await cb.answer("Нет телефона", show_alert=True)
@@ -981,7 +1014,8 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
         raise RuntimeError("В .env не задан DELIVERY_ADDRESS")
     phone = await ctx.storage.get_admin_phone(sender.id)
     if not phone:
-        raise RuntimeError("Сначала сохраните номер: /phone")
+        raise RuntimeError("Сначала сохраните номер: /myphone")
+    cc = await ctx.storage.get_admin_email(sender.id)
     bad = unavailable_in_orders(menu, orders)
     if bad:
         raise UnavailableItemsError(format_unavailable_report(bad))
@@ -1009,7 +1043,8 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
             BufferedInputFile(xls, filename=filename),
             caption="Тест: SMTP пустой, на почту не отправлялось. Лист заказа во вложении.",
         )
-        await bot.send_message(sender.id, "Текст письма:\n\n" + body[:3500])
+        note = f"\nCc: {cc}" if cc else ""
+        await bot.send_message(sender.id, "Текст письма:\n\n" + body[:3500] + note)
     else:
         await asyncio.to_thread(
             send_order_email,
@@ -1018,6 +1053,7 @@ async def actually_send(bot: Bot, ctx: Ctx, day: date, sender: User) -> bool:
             body,
             xls,
             filename,
+            cc=cc,
         )
     await ctx.storage.set_sent(day, True)
     await ctx.storage.set_closed(day, True)
