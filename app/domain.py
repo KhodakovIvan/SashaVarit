@@ -261,5 +261,6 @@ def email_body(
             _total_line(grand, any_weighty) + f", персон: {len(orders)}",
             "",
             "Отправлено ботом SashaVarit.",
+            "https://github.com/KhodakovIvan/SashaVarit",
         ]
     )

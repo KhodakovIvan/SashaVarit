@@ -37,6 +37,8 @@ def send_order_email(
     body: str,
     xls_bytes: bytes,
     filename: str,
+    *,
+    cc: str | None = None,
 ) -> None:
     if not settings.smtp_user or not settings.smtp_password:
         raise RuntimeError("В .env не заданы SMTP_USER / SMTP_PASSWORD (или IMAP_PASSWORD)")
@@ -44,6 +46,8 @@ def send_order_email(
     msg = EmailMessage()
     msg["From"] = settings.smtp_from
     msg["To"] = settings.order_email_to
+    if cc and cc.strip():
+        msg["Cc"] = cc.strip()
     msg["Subject"] = subject
     msg.set_content(body, charset="utf-8")
     msg.add_attachment(
